@@ -332,7 +332,7 @@ fn _main(r: &mut impl io::BufRead, w: &mut impl io::Write) -> i32 {
     let mut table = Table::default();
     loop {
         trace!("write prompt");
-        print_prompt();
+        print_prompt(w);
         trace!("input_buffer");
         match input_buffer.read_line(r) {
             Ok(n) => {
@@ -359,6 +359,7 @@ fn _main(r: &mut impl io::BufRead, w: &mut impl io::Write) -> i32 {
                                         let _ = writeln!(w, "{:?}", row);
                                     }
                                 }
+                                let _ = writeln!(w, "Executed");
                             }
                             Err(ExecuteResult::TableFull) => {
                                 let _ = writeln!(w, "table is full");
@@ -393,9 +394,9 @@ fn _main(r: &mut impl io::BufRead, w: &mut impl io::Write) -> i32 {
     return 0;
 }
 
-fn print_prompt() {
-    print!("db > ");
-    io::stdout().flush().unwrap();
+fn print_prompt(w: &mut impl io::Write) {
+    let _ = write!(w, "db > ");
+    w.flush().unwrap();
 }
 
 trait SliceExt {
