@@ -11,6 +11,8 @@ use std::process::exit;
 
 use log::trace;
 
+mod integration_test;
+
 struct InputBuffer {
     buffer: String,
 }
@@ -32,12 +34,13 @@ impl InputBuffer {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum MetaCommandResult {
+    Exit,
     UnrecognizedCommand,
 }
 
 fn do_meta_command(input: &str) -> Result<(), MetaCommandResult> {
     match input {
-        ".exit" => exit(0),
+        ".exit" => return Err(MetaCommandResult::Exit),
         _ => return Err(MetaCommandResult::UnrecognizedCommand),
     }
 }
@@ -285,23 +288,29 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), Execut
     return Ok(());
 }
 
-fn execute_select(_statement: &Statement, table: &mut Table) -> Result<(), ExecuteResult> {
+fn execute_select(_statement: &Statement, table: &mut Table) -> Result<Vec<Row>, ExecuteResult> {
+    let mut rows = Vec::new();
     for i in 0..table.num_rows {
         let page_num = table.page_num(i);
         let bytes_offset = table.bytes_offset(i);
         let bytes = Vec::from(&table.pages[page_num][bytes_offset..bytes_offset + ROW_SIZE]);
         log::error!("bytes: {:?}", bytes);
         let row = Row::deserialize(&bytes);
-        println!("{:?}", row);
         log::trace!("{:?}", row);
+        rows.push(row);
     }
-    return Ok(());
+    return Ok(rows);
 }
 
-fn execute_statement(statement: &Statement, table: &mut Table) -> Result<(), ExecuteResult> {
+// テストのため一時的にVec<Row>を返すようにしておく
+fn execute_statement(statement: &Statement, table: &mut Table) -> Result<Vec<Row>, ExecuteResult> {
     match statement.st_type {
         StatementType::Insert => {
-            return execute_insert(statement, table);
+            // テストのためselectでRowsを返したいので一時的に合わせておく
+            match execute_insert(statement, table) {
+                Ok(_) => return Ok(vec![]),
+                Err(e) => return Err(e),
+            };
         }
         StatementType::Select => {
             return execute_select(statement, table);
@@ -311,20 +320,31 @@ fn execute_statement(statement: &Statement, table: &mut Table) -> Result<(), Exe
 
 fn main() {
     env_logger::init();
-    let mut input_buffer = InputBuffer::new();
     let stdin = io::stdin();
     let mut stdin = stdin.lock();
+    let mut w = io::stdout();
+    let result = _main(&mut stdin, &mut w);
+    exit(result);
+}
+
+fn _main(r: &mut impl io::BufRead, w: &mut impl io::Write) -> i32 {
+    let mut input_buffer = InputBuffer::new();
     let mut table = Table::default();
     loop {
+        trace!("write prompt");
         print_prompt();
-        match input_buffer.read_line(&mut stdin) {
+        trace!("input_buffer");
+        match input_buffer.read_line(r) {
             Ok(n) => {
                 trace!("read {} bytes", n);
                 if input_buffer.buffer.starts_with(".") {
                     match do_meta_command(&input_buffer.buffer) {
                         Ok(_) => {}
+                        Err(MetaCommandResult::Exit) => {
+                            return 0;
+                        }
                         Err(MetaCommandResult::UnrecognizedCommand) => {
-                            println!("Unrecognized command '{}'", &input_buffer.buffer);
+                            let _ = writeln!(w, "Unrecognized command '{}'", &input_buffer.buffer);
                         }
                     }
                     continue;
@@ -333,36 +353,44 @@ fn main() {
                 match statement {
                     Ok(statement) => {
                         match execute_statement(&statement, &mut table) {
-                            Ok(_) => {}
+                            Ok(rows) => {
+                                if !rows.is_empty() {
+                                    for row in rows {
+                                        let _ = writeln!(w, "{:?}", row);
+                                    }
+                                }
+                            }
                             Err(ExecuteResult::TableFull) => {
-                                println!("table is full");
+                                let _ = writeln!(w, "table is full");
                                 break;
                             }
                             Err(ExecuteResult::InvalidStatement) => {
-                                println!("invalid statement");
+                                let _ = writeln!(w, "invalid statement");
                                 break;
                             }
                         };
                     }
                     Err(PrepareError::UnrecognizedStatement) => {
-                        println!(
+                        let _ = writeln!(
+                            w,
                             "Unrecognized keyword at start of '{}'",
                             &input_buffer.buffer
                         );
                         continue;
                     }
                     Err(PrepareError::SyntaxError) => {
-                        println!("Syntax error at '{}'", &input_buffer.buffer);
+                        let _ = writeln!(w, "Syntax error at '{}'", &input_buffer.buffer);
                         continue;
                     }
                 }
             }
             Err(e) => {
-                println!("error: {:?}", e);
-                exit(1);
+                let _ = writeln!(w, "error: {:?}", e);
+                return 1;
             }
         }
     }
+    return 0;
 }
 
 fn print_prompt() {
