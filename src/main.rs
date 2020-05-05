@@ -8,7 +8,7 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::convert::TryInto;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, Cursor, Read, Seek, SeekFrom};
+use std::io::{self, BufRead, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::process::exit;
 
@@ -202,6 +202,29 @@ impl Pager {
         let _ = self.get_page(page_num);
         self.pages[page_num].as_mut()
     }
+
+    fn flush(&mut self) -> Result<(), String> {
+        for (i, page) in self.pages.iter().enumerate() {
+            if let Some(page) = page {
+                match self.file.seek(SeekFrom::Start((i*PAGE_SIZE) as u64)) {
+                    Ok(_) => {
+                        match self.file.write(&page[..]) {
+                            Ok(n) => {log::trace!("write {} bytes to file", n)},
+                            Err(e) => {
+                                log::error!("failed to write file: {}", e);
+                                return Err(format!("{}", e));
+                            }
+                        };
+                    },
+                    Err(e) => {
+                        log::error!("seed failed {}", e);
+                        return Err(format!("{}", e));
+                    }
+                };
+            }
+        }
+      Ok(())
+    }
 }
 
 struct Table {
@@ -231,8 +254,8 @@ impl Table {
         self.num_rows >= TABLE_MAX_ROWS
     }
 
-    fn close(&self) {
-        todo!();
+    fn close(&mut self) -> Result<(), String> {
+        self.pager.flush()
     }
 }
 
@@ -415,12 +438,17 @@ fn main() {
             std::process::exit(1);
         }
     };
+    log::trace!("filename: {}", &filename);
     let result = _main(filename, &mut stdin, &mut w);
     exit(result);
 }
 
 fn _main<P: AsRef<Path>>(filename: P, r: &mut impl io::BufRead, w: &mut impl io::Write) -> i32 {
+    eprintln!("main start");
+    log::trace!("initialize input_buffer start");
     let mut input_buffer = InputBuffer::new();
+    log::trace!("initialize input_buffer done");
+    log::trace!("initialize table start");
     let mut table = match Table::new(filename) {
         Ok(v) => v,
         Err(e) => {
@@ -428,6 +456,7 @@ fn _main<P: AsRef<Path>>(filename: P, r: &mut impl io::BufRead, w: &mut impl io:
             return 1;
         }
     };
+    log::trace!("initialize table done");
     loop {
         trace!("write prompt");
         print_prompt(w);
@@ -439,6 +468,12 @@ fn _main<P: AsRef<Path>>(filename: P, r: &mut impl io::BufRead, w: &mut impl io:
                     match do_meta_command(&input_buffer.buffer) {
                         Ok(_) => {}
                         Err(MetaCommandResult::Exit) => {
+                            match table.close() {
+                                Ok(_) => {},
+                                Err(e) => {
+                                    log::error!("failed to close db: {}", e);
+                                }
+                            };
                             return 0;
                         }
                         Err(MetaCommandResult::UnrecognizedCommand) => {
