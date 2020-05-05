@@ -5,12 +5,16 @@ extern crate env_logger;
 extern crate log;
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use std::convert::TryInto;
 use std::fmt;
-use std::io::{self, BufRead, Cursor, Read, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufRead, Cursor, Read, Seek, SeekFrom};
+use std::path::Path;
 use std::process::exit;
 
 use log::trace;
 
+#[cfg(test)]
 mod integration_test;
 
 struct InputBuffer {
@@ -132,23 +136,91 @@ const PAGE_SIZE: usize = 4096;
 const TABLE_MAX_PAGES: usize = 100;
 const ROWS_PER_PAGE: usize = PAGE_SIZE / ROW_SIZE;
 const TABLE_MAX_ROWS: usize = ROWS_PER_PAGE * TABLE_MAX_PAGES;
-
 type Page = [u8; PAGE_SIZE];
-struct Table {
-    num_rows: usize,
-    pages: [Page; TABLE_MAX_PAGES],
+
+struct Pager {
+    file: File,
+    file_length: usize,
+    pages: [Option<Page>; TABLE_MAX_PAGES],
 }
 
-impl Default for Table {
-    fn default() -> Self {
-        Table {
-            num_rows: 0,
-            pages: [[0; PAGE_SIZE]; TABLE_MAX_PAGES],
+impl Pager {
+    fn new(filename: impl AsRef<Path>) -> Result<Self, String> {
+        let file = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&filename)
+        {
+            Ok(v) => v,
+            Err(e) => return Err(format!("{}", e)),
+        };
+        let metadata = match fs::metadata(&filename) {
+            Ok(v) => v,
+            Err(e) => return Err(format!("{}", e)),
+        };
+        let file_length = metadata.len().try_into().unwrap();
+        let pages = [None; TABLE_MAX_PAGES];
+        Ok(Pager {
+            file,
+            file_length,
+            pages,
+        })
+    }
+
+    fn get_page(&mut self, page_num: usize) -> Page {
+        match self.pages[page_num] {
+            Some(p) => return p,
+            None => {}
+        };
+        let mut num_pages = self.file_length / PAGE_SIZE;
+        if self.file_length % PAGE_SIZE != 0 {
+            num_pages += 1;
         }
+        if page_num <= num_pages {
+            match self
+                .file
+                .seek(SeekFrom::Start((page_num * PAGE_SIZE) as u64))
+            {
+                Ok(_) => {}
+                Err(e) => {
+                    log::error!("seek failed! {}", e);
+                    panic!("seek failed! {}", e);
+                }
+            };
+        }
+        let mut buf = [0u8; PAGE_SIZE];
+        match self.file.read(&mut buf) {
+            Ok(_) => {}
+            Err(e) => {
+                log::error!("read failed! {}", e);
+                panic!("read failed! {}", e);
+            }
+        };
+        self.pages[page_num] = Some(buf);
+        buf
+    }
+
+    fn get_page_mut(&mut self, page_num: usize) -> Option<&mut Page> {
+        let _ = self.get_page(page_num);
+        self.pages[page_num].as_mut()
     }
 }
 
+struct Table {
+    num_rows: usize,
+    pager: Pager,
+}
+
 impl Table {
+    fn new<P>(filename: P) -> Result<Self, String>
+    where
+        P: AsRef<Path>,
+    {
+        let pager = Pager::new(filename)?;
+        Ok(Table { num_rows: 0, pager })
+    }
+
     fn page_num(&self, row_num: usize) -> usize {
         row_num / ROWS_PER_PAGE
     }
@@ -160,6 +232,10 @@ impl Table {
 
     fn is_full(&self) -> bool {
         self.num_rows >= TABLE_MAX_ROWS
+    }
+
+    fn close(&self) {
+        todo!();
     }
 }
 
@@ -267,6 +343,7 @@ fn prepare_statement(input: &InputBuffer) -> Result<Statement, PrepareError> {
 enum ExecuteResult {
     TableFull,
     InvalidStatement,
+    PageMutFailure,
 }
 
 fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), ExecuteResult> {
@@ -283,7 +360,13 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), Execut
     row_to_insert.serialize(&mut buf);
     let page_num = table.page_num(table.num_rows);
     let bytes_offset = table.bytes_offset(table.num_rows);
-    table.pages[page_num][bytes_offset..(bytes_offset + ROW_SIZE)].copy_from_slice(buf.as_ref());
+    match table.pager.get_page_mut(page_num) {
+        Some(v) => v[bytes_offset..(bytes_offset + ROW_SIZE)].copy_from_slice(buf.as_ref()),
+        None => {
+            log::error!("cannot get mutable reference to page!");
+            return Err(ExecuteResult::PageMutFailure);
+        }
+    };
     table.num_rows += 1;
     return Ok(());
 }
@@ -293,7 +376,10 @@ fn execute_select(_statement: &Statement, table: &mut Table) -> Result<Vec<Row>,
     for i in 0..table.num_rows {
         let page_num = table.page_num(i);
         let bytes_offset = table.bytes_offset(i);
-        let bytes = Vec::from(&table.pages[page_num][bytes_offset..bytes_offset + ROW_SIZE]);
+        let bytes = match table.pager.pages[page_num] {
+            Some(p) => Vec::from(&p[bytes_offset..bytes_offset + ROW_SIZE]),
+            None => vec![0u8; ROW_SIZE],
+        };
         log::error!("bytes: {:?}", bytes);
         let row = Row::deserialize(&bytes);
         log::trace!("{:?}", row);
@@ -323,13 +409,26 @@ fn main() {
     let stdin = io::stdin();
     let mut stdin = stdin.lock();
     let mut w = io::stdout();
-    let result = _main(&mut stdin, &mut w);
+    let filename = match std::env::args().nth(1) {
+        Some(v) => v,
+        None => {
+            eprintln!("pass filename");
+            std::process::exit(1);
+        }
+    };
+    let result = _main(filename, &mut stdin, &mut w);
     exit(result);
 }
 
-fn _main(r: &mut impl io::BufRead, w: &mut impl io::Write) -> i32 {
+fn _main<P: AsRef<Path>>(filename: P, r: &mut impl io::BufRead, w: &mut impl io::Write) -> i32 {
     let mut input_buffer = InputBuffer::new();
-    let mut table = Table::default();
+    let mut table = match Table::new(filename) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = writeln!(w, "failed to initialize table: {}", e);
+            return 1;
+        }
+    };
     loop {
         trace!("write prompt");
         print_prompt(w);
@@ -367,6 +466,10 @@ fn _main(r: &mut impl io::BufRead, w: &mut impl io::Write) -> i32 {
                             }
                             Err(ExecuteResult::InvalidStatement) => {
                                 let _ = writeln!(w, "invalid statement");
+                                break;
+                            }
+                            Err(ExecuteResult::PageMutFailure) => {
+                                let _ = writeln!(w, "get page mutable ref failed");
                                 break;
                             }
                         };
@@ -536,7 +639,7 @@ mod test {
 
     #[test]
     fn test_page_num() {
-        let table = Table::default();
+        let table = Table::new("test.db").unwrap();
         assert_eq!(table.page_num(12), 0);
         assert_eq!(table.page_num(13), 0);
         assert_eq!(table.page_num(14), 1);
@@ -544,7 +647,7 @@ mod test {
     }
 
     fn test_bytes_offset() {
-        let table = Table::default();
+        let table = Table::new("test.db").unwrap();
         assert_eq!(table.bytes_offset(12), 291 * 12);
         assert_eq!(table.bytes_offset(13), 291 * 13);
         assert_eq!(table.bytes_offset(14), 0);
@@ -555,7 +658,7 @@ mod test {
     fn test_execute_statement_insert_into_full_table() {
         let mut table = Table {
             num_rows: TABLE_MAX_ROWS,
-            ..Default::default()
+            pager: Pager::new("test.db").unwrap(),
         };
         let stmt = Statement::new(StatementType::Insert);
         let result = execute_statement(&stmt, &mut table);
@@ -567,7 +670,8 @@ mod test {
     #[test]
     fn test_execute_statement_insert_without_row() {
         let mut table = Table {
-            ..Default::default()
+            num_rows: 0,
+            pager: Pager::new("test.db").unwrap(),
         };
         let stmt = Statement::new(StatementType::Insert);
         let result = execute_statement(&stmt, &mut table);
@@ -580,7 +684,8 @@ mod test {
     fn test_execute_statement_insert() {
         init();
         let mut table = Table {
-            ..Default::default()
+            num_rows: 0,
+            pager: Pager::new("test.db").unwrap(),
         };
         let id = 1;
         let username_bytes: &[u8] = b"totem3";
@@ -606,13 +711,16 @@ mod test {
         assert!(result.is_ok());
         let mut expected = Vec::with_capacity(ROW_SIZE);
         row.serialize(&mut expected);
-        let buf = Vec::from(&table.pages[0][0..ROW_SIZE]);
+        let buf = match table.pager.pages[0] {
+            Some(p) => Vec::from(&p[0..ROW_SIZE]),
+            None => vec![0u8; ROW_SIZE],
+        };
         assert_eq!(buf, expected);
     }
 
     #[test]
     fn test_execute_select() {
-        let mut table = Table::default();
+        let mut table = Table::new("test.db").unwrap();
         let stmt = Statement::new(StatementType::Select);
         let result = execute_statement(&stmt, &mut table);
         assert!(result.is_ok());
@@ -621,9 +729,7 @@ mod test {
     #[test]
     fn test_execute_insert_and_select() {
         init();
-        let mut table = Table {
-            ..Default::default()
-        };
+        let mut table = Table::new("test.db").unwrap();
         let id = 1;
         let username_bytes: &[u8] = b"totem3";
         let mut username: [u8; 32] = [0; 32];
