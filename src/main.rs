@@ -23,16 +23,16 @@ struct InputBuffer {
 
 impl InputBuffer {
     fn new() -> Self {
-        return InputBuffer {
+        InputBuffer {
             buffer: "".to_string(),
-        };
+        }
     }
 
     fn read_line(&mut self, input: &mut dyn io::BufRead) -> io::Result<usize> {
         let mut buf = String::new();
         let size = input.read_line(&mut buf)?;
         self.buffer = buf.trim_end().to_string();
-        return Ok(size);
+        Ok(size)
     }
 }
 
@@ -44,8 +44,8 @@ enum MetaCommandResult {
 
 fn do_meta_command(input: &str) -> Result<(), MetaCommandResult> {
     match input {
-        ".exit" => return Err(MetaCommandResult::Exit),
-        _ => return Err(MetaCommandResult::UnrecognizedCommand),
+        ".exit" => Err(MetaCommandResult::Exit),
+        _ => Err(MetaCommandResult::UnrecognizedCommand),
     }
 }
 
@@ -57,10 +57,10 @@ struct Statement {
 
 impl Statement {
     fn new(st_type: StatementType) -> Self {
-        return Statement {
+        Statement {
             st_type,
             row_to_insert: None,
-        };
+        }
     }
 }
 
@@ -107,18 +107,18 @@ impl Row {
         buf.extend_from_slice(&self.username);
         buf.extend_from_slice(&self.email);
     }
-    fn deserialize(input: &Vec<u8>) -> Row {
+    fn deserialize(input: &[u8]) -> Row {
         let mut rdr = Cursor::new(input);
         let id = rdr.read_u32::<LittleEndian>().unwrap();
         let mut username = [0u8; 32];
         let _ = rdr.read(&mut username).unwrap();
         let mut email = [0u8; 255];
         let _ = rdr.read(&mut email).unwrap();
-        return Row {
+        Row {
             id,
             username,
             email,
-        };
+        }
     }
 }
 
@@ -169,10 +169,7 @@ impl Pager {
     }
 
     fn get_page(&mut self, page_num: usize) -> Page {
-        match self.pages[page_num] {
-            Some(p) => return p,
-            None => {}
-        };
+        if let Some(p) = self.pages[page_num] { return p };
         let mut num_pages = self.file_length / PAGE_SIZE;
         if self.file_length % PAGE_SIZE != 0 {
             num_pages += 1;
@@ -284,6 +281,7 @@ fn prepare_statement(input: &InputBuffer) -> Result<Statement, PrepareError> {
             }
         };
         let _ = username.pop(); // 末尾の"を取り除く
+        #[allow(unused)]
         let username_str = match std::str::from_utf8(&username) {
             Ok(v) => v,
             Err(e) => {
@@ -308,6 +306,7 @@ fn prepare_statement(input: &InputBuffer) -> Result<Statement, PrepareError> {
             }
         };
         let _ = email.pop(); // 末尾の"を取り除く
+        #[allow(unused)]
         let email_str = match std::str::from_utf8(&email) {
             Ok(v) => v,
             Err(e) => {
@@ -336,7 +335,7 @@ fn prepare_statement(input: &InputBuffer) -> Result<Statement, PrepareError> {
         let statement = Statement::new(StatementType::Select);
         return Ok(statement);
     }
-    return Err(PrepareError::UnrecognizedStatement);
+    Err(PrepareError::UnrecognizedStatement)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -368,7 +367,7 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), Execut
         }
     };
     table.num_rows += 1;
-    return Ok(());
+    Ok(())
 }
 
 fn execute_select(_statement: &Statement, table: &mut Table) -> Result<Vec<Row>, ExecuteResult> {
@@ -385,7 +384,7 @@ fn execute_select(_statement: &Statement, table: &mut Table) -> Result<Vec<Row>,
         log::trace!("{:?}", row);
         rows.push(row);
     }
-    return Ok(rows);
+    Ok(rows)
 }
 
 // テストのため一時的にVec<Row>を返すようにしておく
@@ -394,12 +393,12 @@ fn execute_statement(statement: &Statement, table: &mut Table) -> Result<Vec<Row
         StatementType::Insert => {
             // テストのためselectでRowsを返したいので一時的に合わせておく
             match execute_insert(statement, table) {
-                Ok(_) => return Ok(vec![]),
-                Err(e) => return Err(e),
-            };
+                Ok(_) => Ok(vec![]),
+                Err(e) => Err(e),
+            }
         }
         StatementType::Select => {
-            return execute_select(statement, table);
+            execute_select(statement, table)
         }
     }
 }
@@ -436,7 +435,7 @@ fn _main<P: AsRef<Path>>(filename: P, r: &mut impl io::BufRead, w: &mut impl io:
         match input_buffer.read_line(r) {
             Ok(n) => {
                 trace!("read {} bytes", n);
-                if input_buffer.buffer.starts_with(".") {
+                if input_buffer.buffer.starts_with('.') {
                     match do_meta_command(&input_buffer.buffer) {
                         Ok(_) => {}
                         Err(MetaCommandResult::Exit) => {
@@ -494,7 +493,7 @@ fn _main<P: AsRef<Path>>(filename: P, r: &mut impl io::BufRead, w: &mut impl io:
             }
         }
     }
-    return 0;
+    0
 }
 
 fn print_prompt(w: &mut impl io::Write) {
@@ -508,16 +507,16 @@ trait SliceExt {
 
 impl SliceExt for [u8] {
     fn trim(&self) -> &[u8] {
-        fn is_whitespace(c: &u8) -> bool {
-            c == &b'\t' || c == &b' '
+        fn is_whitespace(c: u8) -> bool {
+            c == b'\t' || c == b' '
         }
 
-        fn is_not_whitespace(c: &u8) -> bool {
+        fn is_not_whitespace(c: u8) -> bool {
             !is_whitespace(c)
         }
 
-        if let Some(first) = self.iter().position(is_not_whitespace) {
-            if let Some(last) = self.iter().rposition(is_not_whitespace) {
+        if let Some(first) = self.iter().position(|&x| is_not_whitespace(x)) {
+            if let Some(last) = self.iter().rposition(|&x| is_not_whitespace(x)) {
                 &self[first..last + 1]
             } else {
                 unreachable!();
@@ -639,7 +638,7 @@ mod test {
 
     #[test]
     fn test_page_num() {
-        let table = Table::new("test.db").unwrap();
+        let table = Table::new("tmp/test.db").unwrap();
         assert_eq!(table.page_num(12), 0);
         assert_eq!(table.page_num(13), 0);
         assert_eq!(table.page_num(14), 1);
@@ -647,18 +646,18 @@ mod test {
     }
 
     fn test_bytes_offset() {
-        let table = Table::new("test.db").unwrap();
+        let table = Table::new("tmp/test.db").unwrap();
         assert_eq!(table.bytes_offset(12), 291 * 12);
         assert_eq!(table.bytes_offset(13), 291 * 13);
         assert_eq!(table.bytes_offset(14), 0);
-        assert_eq!(table.bytes_offset(15), 291 * 1);
+        assert_eq!(table.bytes_offset(15), 291);
     }
 
     #[test]
     fn test_execute_statement_insert_into_full_table() {
         let mut table = Table {
             num_rows: TABLE_MAX_ROWS,
-            pager: Pager::new("test.db").unwrap(),
+            pager: Pager::new("tmp/test.db").unwrap(),
         };
         let stmt = Statement::new(StatementType::Insert);
         let result = execute_statement(&stmt, &mut table);
@@ -671,7 +670,7 @@ mod test {
     fn test_execute_statement_insert_without_row() {
         let mut table = Table {
             num_rows: 0,
-            pager: Pager::new("test.db").unwrap(),
+            pager: Pager::new("tmp/test.db").unwrap(),
         };
         let stmt = Statement::new(StatementType::Insert);
         let result = execute_statement(&stmt, &mut table);
@@ -685,7 +684,7 @@ mod test {
         init();
         let mut table = Table {
             num_rows: 0,
-            pager: Pager::new("test.db").unwrap(),
+            pager: Pager::new("tmp/test.db").unwrap(),
         };
         let id = 1;
         let username_bytes: &[u8] = b"totem3";
@@ -720,7 +719,7 @@ mod test {
 
     #[test]
     fn test_execute_select() {
-        let mut table = Table::new("test.db").unwrap();
+        let mut table = Table::new("tmp/test.db").unwrap();
         let stmt = Statement::new(StatementType::Select);
         let result = execute_statement(&stmt, &mut table);
         assert!(result.is_ok());
@@ -729,7 +728,7 @@ mod test {
     #[test]
     fn test_execute_insert_and_select() {
         init();
-        let mut table = Table::new("test.db").unwrap();
+        let mut table = Table::new("tmp/test.db").unwrap();
         let id = 1;
         let username_bytes: &[u8] = b"totem3";
         let mut username: [u8; 32] = [0; 32];
@@ -748,7 +747,7 @@ mod test {
         };
         let stmt = Statement {
             st_type: StatementType::Insert,
-            row_to_insert: Some(row.clone()),
+            row_to_insert: Some(row),
         };
         let result = execute_statement(&stmt, &mut table);
         assert!(result.is_ok());

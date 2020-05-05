@@ -20,7 +20,7 @@ select
     let mut buf: &[u8] = buf.as_ref();
     let mut r = BufReader::new(&mut buf);
     let mut w: Vec<u8> = vec![];
-    let filename = "test_integration.db";
+    let filename = "tmp/test_integration.db";
     _main(filename, &mut r, &mut w);
     let s = std::str::from_utf8(&w).unwrap();
     let row = Row {
@@ -43,7 +43,7 @@ select
 //     let mut buf: &[u8] = buf.as_ref();
 //     let mut r = BufReader::new(&mut buf);
 //     let mut w: Vec<u8> = vec![];
-//     let filename = "test_keeps_data_after_closing_connection.db";
+//     let filename = "tmp/test_keeps_data_after_closing_connection.db";
 //     _main(filename, &mut r, &mut w);
 //     let s = std::str::from_utf8(&w).unwrap();
 
