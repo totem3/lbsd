@@ -136,12 +136,12 @@ const PAGE_SIZE: usize = 4096;
 const TABLE_MAX_PAGES: usize = 100;
 const ROWS_PER_PAGE: usize = PAGE_SIZE / ROW_SIZE;
 const TABLE_MAX_ROWS: usize = ROWS_PER_PAGE * TABLE_MAX_PAGES;
-type Page = [u8; PAGE_SIZE];
+type Page = Vec<u8>;
 
 struct Pager {
     file: File,
     file_length: usize,
-    pages: [Option<Page>; TABLE_MAX_PAGES],
+    pages: Vec<Option<Page>>,
 }
 
 impl Pager {
@@ -160,7 +160,7 @@ impl Pager {
             Err(e) => return Err(format!("{}", e)),
         };
         let file_length = metadata.len().try_into().unwrap();
-        let pages = [None; TABLE_MAX_PAGES];
+        let pages = vec![None; TABLE_MAX_PAGES];
         Ok(Pager {
             file,
             file_length,
@@ -168,8 +168,8 @@ impl Pager {
         })
     }
 
-    fn get_page(&mut self, page_num: usize) -> Page {
-        if let Some(p) = self.pages[page_num] { return p };
+    fn get_page(&mut self, page_num: usize) -> Option<&Page> {
+        if self.pages[page_num].is_some() { return self.pages[page_num].as_ref(); };
         let mut num_pages = self.file_length / PAGE_SIZE;
         if self.file_length % PAGE_SIZE != 0 {
             num_pages += 1;
@@ -186,7 +186,7 @@ impl Pager {
                 }
             };
         }
-        let mut buf = [0u8; PAGE_SIZE];
+        let mut buf = vec![0u8; PAGE_SIZE];
         match self.file.read(&mut buf) {
             Ok(_) => {}
             Err(e) => {
@@ -195,7 +195,7 @@ impl Pager {
             }
         };
         self.pages[page_num] = Some(buf);
-        buf
+        self.pages[page_num].as_ref()
     }
 
     fn get_page_mut(&mut self, page_num: usize) -> Option<&mut Page> {
@@ -398,7 +398,7 @@ fn execute_select(_statement: &Statement, table: &mut Table) -> Result<Vec<Row>,
     for i in 0..table.num_rows {
         let page_num = table.page_num(i);
         let bytes_offset = table.bytes_offset(i);
-        let bytes = match table.pager.pages[page_num] {
+        let bytes = match table.pager.get_page(page_num) {
             Some(p) => Vec::from(&p[bytes_offset..bytes_offset + ROW_SIZE]),
             None => vec![0u8; ROW_SIZE],
         };
@@ -745,7 +745,7 @@ mod test {
         assert!(result.is_ok());
         let mut expected = Vec::with_capacity(ROW_SIZE);
         row.serialize(&mut expected);
-        let buf = match table.pager.pages[0] {
+        let buf = match table.pager.get_page(0) {
             Some(p) => Vec::from(&p[0..ROW_SIZE]),
             None => vec![0u8; ROW_SIZE],
         };
