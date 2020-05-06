@@ -444,8 +444,6 @@ fn main() {
 }
 
 fn _main<P: AsRef<Path>>(filename: P, r: &mut impl io::BufRead, w: &mut impl io::Write) -> i32 {
-    eprintln!("main start");
-    log::trace!("initialize input_buffer start");
     let mut input_buffer = InputBuffer::new();
     log::trace!("initialize input_buffer done");
     log::trace!("initialize table start");
@@ -456,11 +454,8 @@ fn _main<P: AsRef<Path>>(filename: P, r: &mut impl io::BufRead, w: &mut impl io:
             return 1;
         }
     };
-    log::trace!("initialize table done");
     loop {
-        trace!("write prompt");
         print_prompt(w);
-        trace!("input_buffer");
         match input_buffer.read_line(r) {
             Ok(n) => {
                 trace!("read {} bytes", n);
