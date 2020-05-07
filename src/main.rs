@@ -169,8 +169,14 @@ impl Pager {
     }
 
     fn get_page(&mut self, page_num: usize) -> Option<&Page> {
-        if self.pages[page_num].is_some() { return self.pages[page_num].as_ref(); };
+        log::trace!("get_page called");
+        if self.pages[page_num].is_some() {
+            log::trace!("page is already on memory. return");
+            return self.pages[page_num].as_ref();
+        };
+        log::trace!("page is not on memory. try to read from file");
         let mut num_pages = self.file_length / PAGE_SIZE;
+        trace!("num_pages: {}", num_pages);
         if self.file_length % PAGE_SIZE != 0 {
             num_pages += 1;
         }
@@ -179,7 +185,9 @@ impl Pager {
                 .file
                 .seek(SeekFrom::Start((page_num * PAGE_SIZE) as u64))
             {
-                Ok(_) => {}
+                Ok(_) => {
+                    trace!("seek to {}", page_num * PAGE_SIZE);
+                }
                 Err(e) => {
                     log::error!("seek failed! {}", e);
                     panic!("seek failed! {}", e);
@@ -188,7 +196,9 @@ impl Pager {
         }
         let mut buf = vec![0u8; PAGE_SIZE];
         match self.file.read(&mut buf) {
-            Ok(_) => {}
+            Ok(n) => {
+                trace!("read from file succeeded. read {} bytes", n);
+            }
             Err(e) => {
                 log::error!("read failed! {}", e);
                 panic!("read failed! {}", e);
@@ -203,27 +213,52 @@ impl Pager {
         self.pages[page_num].as_mut()
     }
 
-    fn flush(&mut self) -> Result<(), String> {
-        for (i, page) in self.pages.iter().enumerate() {
-            if let Some(page) = page {
-                match self.file.seek(SeekFrom::Start((i*PAGE_SIZE) as u64)) {
-                    Ok(_) => {
-                        match self.file.write(&page[..]) {
-                            Ok(n) => {log::trace!("write {} bytes to file", n)},
-                            Err(e) => {
-                                log::error!("failed to write file: {}", e);
-                                return Err(format!("{}", e));
-                            }
-                        };
-                    },
+    fn flush(&mut self, num_rows: usize) -> Result<(), String> {
+        let full_pages = num_rows / ROWS_PER_PAGE;
+        for i in 0..full_pages {
+            match &self.pages[i] {
+                Some(page) => {
+                    match self.file.write(&page[..]) {
+                        Ok(n) => {log::trace!("write {} bytes to file", n)},
+                        Err(e) => {
+                            log::error!("failed to write file: {}", e);
+                            return Err(format!("{}", e));
+                        }
+                    };
+                },
+                None => {}
+            }
+        }
+        // TODO: 境界値の扱いが雑でうまく復元できていないので治す
+        // 境界値の扱いの問題ではなくて、ファイルに書き込んだときに末尾が改行コードになっているっぽい？
+        let additional_rows = num_rows % ROWS_PER_PAGE;
+        match &self.pages[full_pages] {
+            Some(page) => {
+                for (cnt, u) in page[0..(additional_rows*ROW_SIZE)].iter().enumerate() {
+                    if cnt % 16 == 0 {
+                        print!("{:04}: ", cnt);
+                    }
+                    print!("{:02x} ", u);
+                    if (cnt+1) % 16 == 0 {
+                        println!();
+                    }
+                }
+                println!();
+                match self.file.write(&page[0..(additional_rows*ROW_SIZE)]) {
+                    Ok(n) => {log::trace!("write {} bytes to file", n)},
                     Err(e) => {
-                        log::error!("seed failed {}", e);
+                        log::error!("failed to write file: {}", e);
                         return Err(format!("{}", e));
                     }
                 };
             }
+            None => {}
         }
       Ok(())
+    }
+
+    fn get_num_page(&self) -> usize {
+      self.file_length / ROW_SIZE
     }
 }
 
@@ -237,8 +272,10 @@ impl Table {
     where
         P: AsRef<Path>,
     {
-        let pager = Pager::new(filename)?;
-        Ok(Table { num_rows: 0, pager })
+        let pager = Pager::new(&filename)?;
+        let num_rows = pager.get_num_page();
+        trace!("initialize Table for {:?}. num_rows: {}", &filename.as_ref().display(), num_rows);
+        Ok(Table { num_rows, pager })
     }
 
     fn page_num(&self, row_num: usize) -> usize {
@@ -255,7 +292,7 @@ impl Table {
     }
 
     fn close(&mut self) -> Result<(), String> {
-        self.pager.flush()
+        self.pager.flush(self.num_rows)
     }
 }
 
@@ -380,6 +417,7 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), Execut
     };
     let mut buf = Vec::with_capacity(ROW_SIZE);
     row_to_insert.serialize(&mut buf);
+    trace!("serialized size: {}", buf.len());
     let page_num = table.page_num(table.num_rows);
     let bytes_offset = table.bytes_offset(table.num_rows);
     match table.pager.get_page_mut(page_num) {
@@ -438,15 +476,12 @@ fn main() {
             std::process::exit(1);
         }
     };
-    log::trace!("filename: {}", &filename);
     let result = _main(filename, &mut stdin, &mut w);
     exit(result);
 }
 
 fn _main<P: AsRef<Path>>(filename: P, r: &mut impl io::BufRead, w: &mut impl io::Write) -> i32 {
     let mut input_buffer = InputBuffer::new();
-    log::trace!("initialize input_buffer done");
-    log::trace!("initialize table start");
     let mut table = match Table::new(filename) {
         Ok(v) => v,
         Err(e) => {
