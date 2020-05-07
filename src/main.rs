@@ -418,10 +418,9 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), Execut
     let mut buf = Vec::with_capacity(ROW_SIZE);
     row_to_insert.serialize(&mut buf);
     trace!("serialized size: {}", buf.len());
-    let page_num = table.page_num(table.num_rows);
-    let bytes_offset = table.bytes_offset(table.num_rows);
-    match table.pager.get_page_mut(page_num) {
-        Some(v) => v[bytes_offset..(bytes_offset + ROW_SIZE)].copy_from_slice(buf.as_ref()),
+    let mut cursor = TCursor::table_end(table);
+    match cursor.get_mut() {
+        Some(v) => v.copy_from_slice(buf.as_ref()),
         None => {
             log::error!("cannot get mutable reference to page!");
             return Err(ExecuteResult::PageMutFailure);
@@ -433,13 +432,13 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), Execut
 
 fn execute_select(_statement: &Statement, table: &mut Table) -> Result<Vec<Row>, ExecuteResult> {
     let mut rows = Vec::new();
-    for i in 0..table.num_rows {
-        let page_num = table.page_num(i);
-        let bytes_offset = table.bytes_offset(i);
-        let bytes = match table.pager.get_page(page_num) {
-            Some(p) => Vec::from(&p[bytes_offset..bytes_offset + ROW_SIZE]),
+    let mut cursor = TCursor::table_start(table);
+    while !cursor.end_of_table {
+        let bytes = match cursor.get() {
+            Some(v) => v.to_vec(),
             None => vec![0u8; ROW_SIZE],
         };
+        cursor.advance();
         log::error!("bytes: {:?}", bytes);
         let row = Row::deserialize(&bytes);
         log::trace!("{:?}", row);
@@ -460,6 +459,63 @@ fn execute_statement(statement: &Statement, table: &mut Table) -> Result<Vec<Row
         }
         StatementType::Select => {
             execute_select(statement, table)
+        }
+    }
+}
+
+struct TCursor<'a> {
+    table: &'a mut Table,
+    row_num: usize,
+    end_of_table: bool,
+}
+
+impl<'a> TCursor<'a> {
+    fn table_start(table: &'a mut Table) -> Self {
+        let end_of_table = table.num_rows == 0;
+        TCursor {
+            table,
+            row_num: 0,
+            end_of_table
+        }
+    }
+
+    fn table_end(table: &'a mut Table) -> Self {
+        let row_num = table.num_rows;
+        TCursor {
+            table,
+            row_num,
+            end_of_table: true,
+        }
+    }
+
+    fn advance(&mut self) {
+        self.row_num += 1;
+        if self.row_num >= self.table.num_rows {
+            self.end_of_table = true
+        }
+    }
+
+    fn get_mut(&mut self) -> Option<&mut [u8]> {
+        let row_num = self.row_num;
+        let page_num = row_num / ROWS_PER_PAGE;
+        let bytes_offset = self.table.bytes_offset(row_num);
+        match self.table.pager.get_page_mut(page_num) {
+            Some(page) => {
+                Some(&mut page[bytes_offset..(bytes_offset+ROW_SIZE)])
+            }
+            None => None
+        }
+    }
+
+    fn get(&mut self) -> Option<&[u8]> {
+        let row_num = self.row_num;
+        let page_num = row_num / ROWS_PER_PAGE;
+        let bytes_offset = self.table.bytes_offset(row_num);
+        match self.table.pager.get_page(page_num) {
+            Some(page) => {
+                Some(&page[bytes_offset..(bytes_offset+ROW_SIZE)])
+            }
+            None => None
         }
     }
 }
