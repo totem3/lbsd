@@ -236,7 +236,7 @@ impl Pager {
             Some(page) => {
                 for (cnt, u) in page[0..(additional_rows*ROW_SIZE)].iter().enumerate() {
                     if cnt % 16 == 0 {
-                        print!("{:04}: ", cnt);
+                        print!("{:04x}: ", cnt);
                     }
                     print!("{:02x} ", u);
                     if (cnt+1) % 16 == 0 {
