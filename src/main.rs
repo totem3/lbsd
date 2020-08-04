@@ -14,6 +14,8 @@ use std::process::exit;
 
 use log::trace;
 
+pub mod tree;
+
 #[cfg(test)]
 mod integration_test;
 
@@ -136,12 +138,14 @@ const PAGE_SIZE: usize = 4096;
 const TABLE_MAX_PAGES: usize = 100;
 const ROWS_PER_PAGE: usize = PAGE_SIZE / ROW_SIZE;
 const TABLE_MAX_ROWS: usize = ROWS_PER_PAGE * TABLE_MAX_PAGES;
+
 type Page = Vec<u8>;
 
 struct Pager {
     file: File,
     file_length: usize,
     pages: Vec<Option<Page>>,
+    num_pages: usize,
 }
 
 impl Pager {
@@ -161,10 +165,15 @@ impl Pager {
         };
         let file_length = metadata.len().try_into().unwrap();
         let pages = vec![None; TABLE_MAX_PAGES];
+        trace!("file_length: {}", file_length);
+        trace!("PAGE_SIZE: {}", PAGE_SIZE);
+        let num_pages = ((file_length as f32) / (PAGE_SIZE as f32)).ceil() as usize;
+        trace!("num_pages: {}", num_pages);
         Ok(Pager {
             file,
             file_length,
             pages,
+            num_pages
         })
     }
 
@@ -213,71 +222,52 @@ impl Pager {
         self.pages[page_num].as_mut()
     }
 
+    fn flush_page(&mut self, page_num: usize) -> Result<usize, String> {
+        if let Some(page) = &self.pages[page_num] {
+            let buf = &page[..];
+            self.file.write(buf).map_err(|e| e.to_string())
+        } else {
+            Err("Page not exists".to_string())
+        }
+    }
+
     fn flush(&mut self, num_rows: usize) -> Result<(), String> {
         let _ = self.file.seek(SeekFrom::Start(0));
         trace!("flush: num_rows: {}", num_rows);
-        let full_pages = num_rows / ROWS_PER_PAGE;
-        trace!("flush: full_pages: {}", full_pages);
-        for i in 0..full_pages {
-            match &self.pages[i] {
-                Some(page) => {
-                    match self.file.write(&page[..]) {
-                        Ok(n) => {log::trace!("write {} bytes to file", n)},
-                        Err(e) => {
-                            log::error!("failed to write file: {}", e);
-                            return Err(format!("{}", e));
-                        }
-                    };
-                },
-                None => {}
-            }
-        }
-        let additional_rows = num_rows % ROWS_PER_PAGE;
-        trace!("flush: additional_rows: {}", additional_rows);
-        match &self.pages[full_pages] {
-            Some(page) => {
-                for (cnt, u) in page[0..(additional_rows*ROW_SIZE)].iter().enumerate() {
-                    if cnt % 16 == 0 {
-                        print!("{:04x}: ", cnt);
-                    }
-                    print!("{:02x} ", u);
-                    if (cnt+1) % 16 == 0 {
-                        println!();
-                    }
+        trace!("flush: num_pages: {}", self.num_pages);
+        for i in 0..self.num_pages {
+            match self.flush_page(i) {
+                Ok(n) =>
+                    { log::trace!("write {} bytes to file", n) }
+                Err(e) => {
+                    log::error!("failed to write file: {}", e);
+                    return Err(e);
                 }
-                println!();
-                match self.file.write(&page[0..(additional_rows*ROW_SIZE)]) {
-                    Ok(n) => {log::trace!("write {} bytes to file", n)},
-                    Err(e) => {
-                        log::error!("failed to write file: {}", e);
-                        return Err(format!("{}", e));
-                    }
-                };
             }
-            None => {}
         }
-      Ok(())
+        Ok(())
     }
 
     fn get_num_page(&self) -> usize {
-      self.file_length / ROW_SIZE
+        self.file_length / ROW_SIZE
     }
 }
 
 struct Table {
     num_rows: usize,
     pager: Pager,
+    root_page_num: u32,
 }
 
 impl Table {
     fn new<P>(filename: P) -> Result<Self, String>
-    where
-        P: AsRef<Path>,
+        where
+            P: AsRef<Path>,
     {
         let pager = Pager::new(&filename)?;
         let num_rows = pager.get_num_page();
         trace!("initialize Table for {:?}. num_rows: {}", &filename.as_ref().display(), num_rows);
-        Ok(Table { num_rows, pager })
+        Ok(Table { num_rows, pager, root_page_num: 0 })
     }
 
     fn page_num(&self, row_num: usize) -> usize {
@@ -344,7 +334,7 @@ fn prepare_statement(input: &InputBuffer) -> Result<Statement, PrepareError> {
         };
         let _ = username.pop(); // 末尾の"を取り除く
         #[allow(unused)]
-        let username_str = match std::str::from_utf8(&username) {
+            let username_str = match std::str::from_utf8(&username) {
             Ok(v) => v,
             Err(e) => {
                 log::error!(
@@ -369,7 +359,7 @@ fn prepare_statement(input: &InputBuffer) -> Result<Statement, PrepareError> {
         };
         let _ = email.pop(); // 末尾の"を取り除く
         #[allow(unused)]
-        let email_str = match std::str::from_utf8(&email) {
+            let email_str = match std::str::from_utf8(&email) {
             Ok(v) => v,
             Err(e) => {
                 log::error!(
@@ -477,7 +467,7 @@ impl<'a> TCursor<'a> {
         TCursor {
             table,
             row_num: 0,
-            end_of_table
+            end_of_table,
         }
     }
 
@@ -503,7 +493,7 @@ impl<'a> TCursor<'a> {
         let bytes_offset = self.table.bytes_offset(row_num);
         match self.table.pager.get_page_mut(page_num) {
             Some(page) => {
-                Some(&mut page[bytes_offset..(bytes_offset+ROW_SIZE)])
+                Some(&mut page[bytes_offset..(bytes_offset + ROW_SIZE)])
             }
             None => None
         }
@@ -515,7 +505,7 @@ impl<'a> TCursor<'a> {
         let bytes_offset = self.table.bytes_offset(row_num);
         match self.table.pager.get_page(page_num) {
             Some(page) => {
-                Some(&page[bytes_offset..(bytes_offset+ROW_SIZE)])
+                Some(&page[bytes_offset..(bytes_offset + ROW_SIZE)])
             }
             None => None
         }
@@ -557,7 +547,7 @@ fn _main<P: AsRef<Path>>(filename: P, r: &mut impl io::BufRead, w: &mut impl io:
                         Ok(_) => {}
                         Err(MetaCommandResult::Exit) => {
                             match table.close() {
-                                Ok(_) => {},
+                                Ok(_) => {}
                                 Err(e) => {
                                     log::error!("failed to close db: {}", e);
                                 }
@@ -653,6 +643,7 @@ impl SliceExt for [u8] {
 #[cfg(test)]
 mod test {
     use super::*;
+
     fn init() {
         let _ = env_logger::builder().is_test(true).try_init();
     }
@@ -781,6 +772,7 @@ mod test {
         let mut table = Table {
             num_rows: TABLE_MAX_ROWS,
             pager: Pager::new("tmp/test.db").unwrap(),
+            root_page_num: 0
         };
         let stmt = Statement::new(StatementType::Insert);
         let result = execute_statement(&stmt, &mut table);
@@ -794,6 +786,7 @@ mod test {
         let mut table = Table {
             num_rows: 0,
             pager: Pager::new("tmp/test.db").unwrap(),
+            root_page_num: 0
         };
         let stmt = Statement::new(StatementType::Insert);
         let result = execute_statement(&stmt, &mut table);
@@ -808,6 +801,7 @@ mod test {
         let mut table = Table {
             num_rows: 0,
             pager: Pager::new("tmp/test.db").unwrap(),
+            root_page_num: 0
         };
         let id = 1;
         let username_bytes: &[u8] = b"totem3";
