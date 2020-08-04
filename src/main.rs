@@ -214,7 +214,10 @@ impl Pager {
     }
 
     fn flush(&mut self, num_rows: usize) -> Result<(), String> {
+        let _ = self.file.seek(SeekFrom::Start(0));
+        trace!("flush: num_rows: {}", num_rows);
         let full_pages = num_rows / ROWS_PER_PAGE;
+        trace!("flush: full_pages: {}", full_pages);
         for i in 0..full_pages {
             match &self.pages[i] {
                 Some(page) => {
@@ -229,9 +232,8 @@ impl Pager {
                 None => {}
             }
         }
-        // TODO: 境界値の扱いが雑でうまく復元できていないので治す
-        // 境界値の扱いの問題ではなくて、ファイルに書き込んだときに末尾が改行コードになっているっぽい？
         let additional_rows = num_rows % ROWS_PER_PAGE;
+        trace!("flush: additional_rows: {}", additional_rows);
         match &self.pages[full_pages] {
             Some(page) => {
                 for (cnt, u) in page[0..(additional_rows*ROW_SIZE)].iter().enumerate() {
