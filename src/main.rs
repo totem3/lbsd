@@ -167,13 +167,13 @@ impl Pager {
         let pages = vec![None; TABLE_MAX_PAGES];
         trace!("file_length: {}", file_length);
         trace!("PAGE_SIZE: {}", PAGE_SIZE);
-        let num_pages = ((file_length as f32) / (PAGE_SIZE as f32)).ceil() as usize;
+        let num_pages = ::std::cmp::max(((file_length as f32) / (PAGE_SIZE as f32)).ceil() as usize, 1);
         trace!("num_pages: {}", num_pages);
         Ok(Pager {
             file,
             file_length,
             pages,
-            num_pages
+            num_pages,
         })
     }
 
@@ -256,7 +256,7 @@ impl Pager {
 struct Table {
     num_rows: usize,
     pager: Pager,
-    root_page_num: u32,
+    root_page_num: usize,
 }
 
 impl Table {
@@ -398,7 +398,9 @@ enum ExecuteResult {
 }
 
 fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), ExecuteResult> {
+    trace!("execute_insert");
     if table.is_full() {
+        log::error!("table is full");
         return Err(ExecuteResult::TableFull);
     }
     let row_to_insert = match &statement.row_to_insert {
@@ -457,16 +459,19 @@ fn execute_statement(statement: &Statement, table: &mut Table) -> Result<Vec<Row
 
 struct TCursor<'a> {
     table: &'a mut Table,
-    row_num: usize,
+    page_num: usize,
+    cell_num: usize,
     end_of_table: bool,
 }
 
 impl<'a> TCursor<'a> {
     fn table_start(table: &'a mut Table) -> Self {
         let end_of_table = table.num_rows == 0;
+        let node = table.pager.get_page(table.root_page_num);
         TCursor {
             table,
-            row_num: 0,
+            page_num: table.root_page_num,
+            cell_num: 0,
             end_of_table,
         }
     }
@@ -481,16 +486,27 @@ impl<'a> TCursor<'a> {
     }
 
     fn advance(&mut self) {
+        trace!("advance");
+        trace!("advance: before row_num: {}", self.row_num);
         self.row_num += 1;
+        trace!("advance: after row_num: {}", self.row_num);
+        trace!("advance: table.num_rows: {}", self.table.num_rows);
         if self.row_num >= self.table.num_rows {
             self.end_of_table = true
         }
     }
 
     fn get_mut(&mut self) -> Option<&mut [u8]> {
+        trace!("get_mut");
         let row_num = self.row_num;
         let page_num = row_num / ROWS_PER_PAGE;
         let bytes_offset = self.table.bytes_offset(row_num);
+        trace!("get: row_num: {}", row_num);
+        trace!("get: ROWS_PER_PAGE: {}", ROWS_PER_PAGE);
+        trace!("get: page_num: {}", page_num);
+        if page_num > self.table.pager.num_pages {
+            self.table.pager.num_pages += 1;
+        }
         match self.table.pager.get_page_mut(page_num) {
             Some(page) => {
                 Some(&mut page[bytes_offset..(bytes_offset + ROW_SIZE)])
@@ -502,7 +518,13 @@ impl<'a> TCursor<'a> {
     fn get(&mut self) -> Option<&[u8]> {
         let row_num = self.row_num;
         let page_num = row_num / ROWS_PER_PAGE;
+        trace!("get: row_num: {}", row_num);
+        trace!("get: ROWS_PER_PAGE: {}", ROWS_PER_PAGE);
+        trace!("get: page_num: {}", page_num);
         let bytes_offset = self.table.bytes_offset(row_num);
+        if page_num > self.table.pager.num_pages {
+            self.table.pager.num_pages += 1;
+        }
         match self.table.pager.get_page(page_num) {
             Some(page) => {
                 Some(&page[bytes_offset..(bytes_offset + ROW_SIZE)])
@@ -772,7 +794,7 @@ mod test {
         let mut table = Table {
             num_rows: TABLE_MAX_ROWS,
             pager: Pager::new("tmp/test.db").unwrap(),
-            root_page_num: 0
+            root_page_num: 0,
         };
         let stmt = Statement::new(StatementType::Insert);
         let result = execute_statement(&stmt, &mut table);
@@ -786,7 +808,7 @@ mod test {
         let mut table = Table {
             num_rows: 0,
             pager: Pager::new("tmp/test.db").unwrap(),
-            root_page_num: 0
+            root_page_num: 0,
         };
         let stmt = Statement::new(StatementType::Insert);
         let result = execute_statement(&stmt, &mut table);
@@ -801,7 +823,7 @@ mod test {
         let mut table = Table {
             num_rows: 0,
             pager: Pager::new("tmp/test.db").unwrap(),
-            root_page_num: 0
+            root_page_num: 0,
         };
         let id = 1;
         let username_bytes: &[u8] = b"totem3";
