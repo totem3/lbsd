@@ -13,6 +13,7 @@ use std::path::Path;
 use std::process::exit;
 
 use log::trace;
+use crate::tree::BTreeNode;
 
 pub mod tree;
 
@@ -85,6 +86,12 @@ struct Row {
     email: [u8; COLUMN_EMAIL_SIZE],
 }
 
+impl Default for Row {
+    fn default() -> Self {
+        Row { id: 0, username: [0; COLUMN_USERNAME_SIZE], email: [0; COLUMN_EMAIL_SIZE] }
+    }
+}
+
 impl fmt::Debug for Row {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let username = match std::str::from_utf8(&self.username) {
@@ -139,7 +146,7 @@ const TABLE_MAX_PAGES: usize = 100;
 const ROWS_PER_PAGE: usize = PAGE_SIZE / ROW_SIZE;
 const TABLE_MAX_ROWS: usize = ROWS_PER_PAGE * TABLE_MAX_PAGES;
 
-type Page = Vec<u8>;
+type Page = BTreeNode;
 
 struct Pager {
     file: File,
@@ -178,24 +185,26 @@ impl Pager {
     }
 
     fn get_page(&mut self, page_num: usize) -> Option<&Page> {
-        log::trace!("get_page called");
+        log::trace!("get_page");
         if self.pages[page_num].is_some() {
-            log::trace!("page is already on memory. return");
+            log::trace!("get_page: page is already on memory. return");
             return self.pages[page_num].as_ref();
         };
-        log::trace!("page is not on memory. try to read from file");
+        log::trace!("get_page: page is not on memory. try to read from file");
         let mut num_pages = self.file_length / PAGE_SIZE;
-        trace!("num_pages: {}", num_pages);
+        trace!("get_page: num_pages: {}", num_pages);
         if self.file_length % PAGE_SIZE != 0 {
             num_pages += 1;
         }
+        trace!("get_page: page_num: {}", page_num);
         if page_num <= num_pages {
+            trace!("page_num is equal to or smaller than num_pages");
             match self
                 .file
                 .seek(SeekFrom::Start((page_num * PAGE_SIZE) as u64))
             {
                 Ok(_) => {
-                    trace!("seek to {}", page_num * PAGE_SIZE);
+                    trace!("get_page: seek to {}", page_num * PAGE_SIZE);
                 }
                 Err(e) => {
                     log::error!("seek failed! {}", e);
@@ -213,7 +222,8 @@ impl Pager {
                 panic!("read failed! {}", e);
             }
         };
-        self.pages[page_num] = Some(buf);
+        let page = BTreeNode::from(buf.as_ref());
+        self.pages[page_num] = Some(page);
         self.pages[page_num].as_ref()
     }
 
@@ -224,8 +234,9 @@ impl Pager {
 
     fn flush_page(&mut self, page_num: usize) -> Result<usize, String> {
         if let Some(page) = &self.pages[page_num] {
-            let buf = &page[..];
-            self.file.write(buf).map_err(|e| e.to_string())
+            let mut buf = vec![];
+            page.serialize(&mut buf);
+            self.file.write(&buf).map_err(|e| e.to_string())
         } else {
             Err("Page not exists".to_string())
         }
@@ -409,12 +420,14 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), Execut
             return Err(ExecuteResult::InvalidStatement);
         }
     };
-    let mut buf = Vec::with_capacity(ROW_SIZE);
-    row_to_insert.serialize(&mut buf);
-    trace!("serialized size: {}", buf.len());
     let mut cursor = TCursor::table_end(table);
     match cursor.get_mut() {
-        Some(v) => v.copy_from_slice(buf.as_ref()),
+        Some(row) => {
+            // v.copy_from_slice(buf.as_ref())
+            row.id = row_to_insert.id;
+            row.username = row_to_insert.username;
+            row.email = row_to_insert.email;
+        }
         None => {
             log::error!("cannot get mutable reference to page!");
             return Err(ExecuteResult::PageMutFailure);
@@ -428,13 +441,12 @@ fn execute_select(_statement: &Statement, table: &mut Table) -> Result<Vec<Row>,
     let mut rows = Vec::new();
     let mut cursor = TCursor::table_start(table);
     while !cursor.end_of_table {
-        let bytes = match cursor.get() {
-            Some(v) => v.to_vec(),
-            None => vec![0u8; ROW_SIZE],
+        let row = match cursor.get() {
+            Some(v) => {v.clone()},
+            None => Row::default()
         };
         cursor.advance();
-        log::error!("bytes: {:?}", bytes);
-        let row = Row::deserialize(&bytes);
+        // log::error!("bytes: {:?}", bytes);
         log::trace!("{:?}", row);
         rows.push(row);
     }
@@ -466,71 +478,86 @@ struct TCursor<'a> {
 
 impl<'a> TCursor<'a> {
     fn table_start(table: &'a mut Table) -> Self {
-        let end_of_table = table.num_rows == 0;
-        let node = table.pager.get_page(table.root_page_num);
+        trace!("table_start");
+        let cell_num = 0;
+        trace!("table_start: cell_num: {}", cell_num);
+        let page_num = table.root_page_num;
+        trace!("table_start: page_num: {}", page_num);
+        let end_of_table = table.pager.get_page(table.root_page_num).map_or(false, |page| {
+            match page {
+                BTreeNode::Leaf(page) => {
+                    page.num_cells == 0
+                }
+            }
+        });
+        trace!("table_start: end_of_table: {}", end_of_table);
         TCursor {
             table,
-            page_num: table.root_page_num,
-            cell_num: 0,
+            page_num,
+            cell_num,
             end_of_table,
         }
     }
 
     fn table_end(table: &'a mut Table) -> Self {
-        let row_num = table.num_rows;
+        let page_num = table.root_page_num;
+        let end_of_table = true;
+        let cell_num = table.pager.get_page(page_num).map_or(0, |page| {
+            match page {
+                BTreeNode::Leaf(page) => {
+                    page.num_cells
+                }
+            }
+        }) as usize;
         TCursor {
             table,
-            row_num,
-            end_of_table: true,
+            page_num,
+            end_of_table,
+            cell_num,
         }
     }
 
     fn advance(&mut self) {
         trace!("advance");
-        trace!("advance: before row_num: {}", self.row_num);
-        self.row_num += 1;
-        trace!("advance: after row_num: {}", self.row_num);
-        trace!("advance: table.num_rows: {}", self.table.num_rows);
-        if self.row_num >= self.table.num_rows {
-            self.end_of_table = true
+        let page_num = self.page_num;
+        let node = self.table.pager.get_page(page_num).expect("page not found!!");
+        trace!("advance: before cell_num: {}", self.cell_num);
+        self.cell_num += 1;
+        trace!("advance: after cell_num: {}", self.cell_num);
+        match node {
+            BTreeNode::Leaf(leaf) => {
+                if self.cell_num >= leaf.num_cells as usize {
+                    self.end_of_table = true
+                }
+            }
         }
     }
 
-    fn get_mut(&mut self) -> Option<&mut [u8]> {
+    fn get_mut(&mut self) -> Option<&mut Row> {
         trace!("get_mut");
-        let row_num = self.row_num;
-        let page_num = row_num / ROWS_PER_PAGE;
-        let bytes_offset = self.table.bytes_offset(row_num);
-        trace!("get: row_num: {}", row_num);
-        trace!("get: ROWS_PER_PAGE: {}", ROWS_PER_PAGE);
+        let page_num = self.page_num;
         trace!("get: page_num: {}", page_num);
-        if page_num > self.table.pager.num_pages {
-            self.table.pager.num_pages += 1;
-        }
+        let cell_num = self.cell_num;
         match self.table.pager.get_page_mut(page_num) {
-            Some(page) => {
-                Some(&mut page[bytes_offset..(bytes_offset + ROW_SIZE)])
+            Some(BTreeNode::Leaf(page)) => {
+                Some(page.get_row_mut(cell_num))
             }
-            None => None
+            _ => None,
         }
     }
 
-    fn get(&mut self) -> Option<&[u8]> {
-        let row_num = self.row_num;
-        let page_num = row_num / ROWS_PER_PAGE;
-        trace!("get: row_num: {}", row_num);
-        trace!("get: ROWS_PER_PAGE: {}", ROWS_PER_PAGE);
-        trace!("get: page_num: {}", page_num);
-        let bytes_offset = self.table.bytes_offset(row_num);
-        if page_num > self.table.pager.num_pages {
-            self.table.pager.num_pages += 1;
-        }
-        match self.table.pager.get_page(page_num) {
-            Some(page) => {
-                Some(&page[bytes_offset..(bytes_offset + ROW_SIZE)])
+    fn get(&mut self) -> Option<&Row> {
+        trace!("TCursor::get");
+        let page_num = self.page_num;
+        trace!("TCursor::get page_num: {}", page_num);
+        let cell_num = self.cell_num;
+        self.table.pager.get_page_mut(page_num).map(|page| {
+            match page {
+                BTreeNode::Leaf(page) => {
+                    page.get_row(cell_num)
+                }
             }
-            None => None
-        }
+        })
     }
 }
 
@@ -849,9 +876,15 @@ mod test {
         assert!(result.is_ok());
         let mut expected = Vec::with_capacity(ROW_SIZE);
         row.serialize(&mut expected);
-        let buf = match table.pager.get_page(0) {
-            Some(p) => Vec::from(&p[0..ROW_SIZE]),
-            None => vec![0u8; ROW_SIZE],
+        let mut buf = vec![];
+        match table.pager.get_page(0) {
+            Some(BTreeNode::Leaf(leaf)) => {
+                leaf.key_values.first().and_then(|kv| {
+                    kv.value.serialize(&mut buf);
+                    Some(())
+                });
+            }
+            None => {}
         };
         assert_eq!(buf, expected);
     }
