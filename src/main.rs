@@ -435,11 +435,8 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), Execut
     };
     let mut cursor = TCursor::table_end(table);
     match cursor.get_mut() {
-        Some(row) => {
-            // v.copy_from_slice(buf.as_ref())
-            row.id = row_to_insert.id;
-            row.username = row_to_insert.username;
-            row.email = row_to_insert.email;
+        Some(BTreeNode::Leaf(page)) => {
+            page.insert(row_to_insert.id, row_to_insert.clone());
         }
         None => {
             log::error!("cannot get mutable reference to page!");
@@ -454,7 +451,7 @@ fn execute_select(_statement: &Statement, table: &mut Table) -> Result<Vec<Row>,
     let mut rows = Vec::new();
     let mut cursor = TCursor::table_start(table);
     while !cursor.end_of_table {
-        let row = match cursor.get() {
+        let row = match cursor.get_row() {
             Some(v) => {v.clone()},
             None => Row::default()
         };
@@ -546,10 +543,10 @@ impl<'a> TCursor<'a> {
         }
     }
 
-    fn get_mut(&mut self) -> Option<&mut Row> {
-        trace!("get_mut");
+    fn get_row_mut(&mut self) -> Option<&mut Row> {
+        trace!("TCursor::get_row_mut");
         let page_num = self.page_num;
-        trace!("get: page_num: {}", page_num);
+        trace!("TCursor::get_row_mut: page_num: {}", page_num);
         let cell_num = self.cell_num;
         match self.table.pager.get_page_mut(page_num) {
             Some(BTreeNode::Leaf(page)) => {
@@ -559,10 +556,17 @@ impl<'a> TCursor<'a> {
         }
     }
 
-    fn get(&mut self) -> Option<&Row> {
-        trace!("TCursor::get");
+    fn get_mut(&mut self) -> Option<&mut Page> {
+        trace!("TCursor::get_mut");
         let page_num = self.page_num;
-        trace!("TCursor::get page_num: {}", page_num);
+        trace!("TCursor::get_mut: page_num: {}", page_num);
+        self.table.pager.get_page_mut(page_num)
+    }
+
+    fn get_row(&mut self) -> Option<&Row> {
+        trace!("TCursor::get_row");
+        let page_num = self.page_num;
+        trace!("TCursor::get_row page_num: {}", page_num);
         let cell_num = self.cell_num;
         self.table.pager.get_page_mut(page_num).map(|page| {
             match page {
@@ -571,6 +575,13 @@ impl<'a> TCursor<'a> {
                 }
             }
         })
+    }
+
+    fn get(&mut self) -> Option<&Page> {
+        trace!("TCursor::get");
+        let page_num = self.page_num;
+        trace!("TCursor::get page_num: {}", page_num);
+        self.table.pager.get_page(page_num)
     }
 }
 

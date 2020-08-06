@@ -67,6 +67,15 @@ impl BTreeLeafNode {
         self.key_values[cell_num].value.borrow_mut()
     }
 
+    pub(crate) fn insert(&mut self, key: u32, value: Row) {
+        if self.num_cells >= Self::max_cells() {
+            panic!("max cells!");
+        }
+        let kv = KV { key, value };
+        self.key_values.push(kv);
+        self.num_cells += 1;
+    }
+
     pub const NODE_TYPE_SIZE: usize = 1;
     pub const IS_ROOT_SIZE: usize = 1;
     pub const NUM_CELLS_SIZE: usize = 4;
