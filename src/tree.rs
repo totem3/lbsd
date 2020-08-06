@@ -1,11 +1,11 @@
 use std::io::{Write};
-use crate::{Row, ROW_SIZE};
+use crate::{Row, ROW_SIZE, PAGE_SIZE};
 use byteorder::{ReadBytesExt, LittleEndian, WriteBytesExt};
 use std::convert::TryFrom;
 use std::borrow::{Borrow, BorrowMut};
 use log::trace;
 
-#[derive(Clone,Debug)]
+#[derive(Clone, Debug)]
 pub enum NodeType {
     Leaf = 0,
     Internal = 1,
@@ -66,6 +66,18 @@ impl BTreeLeafNode {
         self.num_cells = self.key_values.len() as u32;
         self.key_values[cell_num].value.borrow_mut()
     }
+
+    pub const NODE_TYPE_SIZE: usize = 1;
+    pub const IS_ROOT_SIZE: usize = 1;
+    pub const NUM_CELLS_SIZE: usize = 4;
+    pub const NODE_HEADER_SIZE: usize = Self::NODE_TYPE_SIZE + Self::IS_ROOT_SIZE + Self::NUM_CELLS_SIZE;
+    pub const NODE_KEY_SIZE: usize = 4;
+    pub const NODE_CELL_SIZE: usize = Self::NODE_KEY_SIZE + ROW_SIZE;
+    pub const NODE_SPACE_FOR_CELLS: usize = PAGE_SIZE - Self::NODE_HEADER_SIZE;
+    pub const NODE_MAX_CELLS: usize = Self::NODE_SPACE_FOR_CELLS / Self::NODE_CELL_SIZE;
+    fn max_cells() -> u32 {
+        Self::NODE_MAX_CELLS as u32
+    }
 }
 
 impl BTreeNode {
@@ -84,7 +96,6 @@ impl BTreeNode {
             }
         };
     }
-
 }
 
 #[test]

@@ -13,7 +13,7 @@ use std::path::Path;
 use std::process::exit;
 
 use log::trace;
-use crate::tree::BTreeNode;
+use crate::tree::{BTreeNode, BTreeLeafNode};
 
 pub mod tree;
 
@@ -48,8 +48,21 @@ enum MetaCommandResult {
 fn do_meta_command(input: &str) -> Result<(), MetaCommandResult> {
     match input {
         ".exit" => Err(MetaCommandResult::Exit),
+        ".constants" => {
+            show_constants()
+        },
         _ => Err(MetaCommandResult::UnrecognizedCommand),
     }
+}
+
+fn show_constants() -> Result<(), MetaCommandResult> {
+    println!("Constants:");
+    println!("ROW_SIZE: {}", ROW_SIZE);
+    println!("NODE_HEADER_SIZE: {}", BTreeLeafNode::NODE_HEADER_SIZE);
+    println!("NODE_CELL_SIZE: {}", BTreeLeafNode::NODE_CELL_SIZE);
+    println!("NODE_SPACE_FOR_CELLS: {}", BTreeLeafNode::NODE_SPACE_FOR_CELLS);
+    println!("NODE_MAX_CELLS: {}", BTreeLeafNode::NODE_MAX_CELLS);
+    Ok(())
 }
 
 #[derive(Debug)]
