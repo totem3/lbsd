@@ -42,16 +42,43 @@ impl InputBuffer {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum MetaCommandResult {
     Exit,
+    TableNotGiven,
     UnrecognizedCommand,
 }
 
-fn do_meta_command(input: &str) -> Result<(), MetaCommandResult> {
-    match input {
+struct MetaCommandArgs<'a> {
+    input: &'a str,
+    table: Option<&'a mut Table>,
+}
+
+fn do_meta_command(args: MetaCommandArgs) -> Result<(), MetaCommandResult> {
+    match args.input {
         ".exit" => Err(MetaCommandResult::Exit),
+        ".btree" => {
+            show_btree(args.table)
+        },
         ".constants" => {
             show_constants()
         },
         _ => Err(MetaCommandResult::UnrecognizedCommand),
+    }
+}
+
+fn show_btree(table: Option<&mut Table>) -> Result<(), MetaCommandResult> {
+    if let Some(table) = table {
+        println!("Tree:");
+        let page_num = table.root_page_num;
+        if let Some(BTreeNode::Leaf(page)) = table.pager.get_page(page_num) {
+            println!("leaf (size {})", page.num_cells);
+            for (i, key_value) in page.key_values.iter().enumerate() {
+                println!(" - {} : {}", i, key_value.key);
+            }
+        } else {
+            println!("page not found");
+        }
+        Ok(())
+    } else {
+        Err(MetaCommandResult::TableNotGiven)
     }
 }
 
@@ -616,7 +643,11 @@ fn _main<P: AsRef<Path>>(filename: P, r: &mut impl io::BufRead, w: &mut impl io:
             Ok(n) => {
                 trace!("read {} bytes", n);
                 if input_buffer.buffer.starts_with('.') {
-                    match do_meta_command(&input_buffer.buffer) {
+                    let args = MetaCommandArgs {
+                        input: &input_buffer.buffer,
+                        table: Some(&mut table)
+                    };
+                    match do_meta_command(args) {
                         Ok(_) => {}
                         Err(MetaCommandResult::Exit) => {
                             match table.close() {
@@ -629,6 +660,9 @@ fn _main<P: AsRef<Path>>(filename: P, r: &mut impl io::BufRead, w: &mut impl io:
                         }
                         Err(MetaCommandResult::UnrecognizedCommand) => {
                             let _ = writeln!(w, "Unrecognized command '{}'", &input_buffer.buffer);
+                        }
+                        Err(MetaCommandResult::TableNotGiven) => {
+                            let _ = writeln!(w, "called meta command '{}' that requires table, but table not given", &input_buffer.buffer);
                         }
                     }
                     continue;
@@ -724,7 +758,8 @@ mod test {
     #[test]
     fn test_unrecognized_meta_command() {
         init();
-        let res = do_meta_command(".foo");
+        let args = MetaCommandArgs { input: ".foo", table: None };
+        let res = do_meta_command(args);
         let err = res.err().unwrap();
         assert_eq!(err, MetaCommandResult::UnrecognizedCommand);
     }
