@@ -259,7 +259,7 @@ impl Pager {
         Ok(())
     }
 
-    fn get_num_page(&self) -> usize {
+    fn get_num_pages(&self) -> usize {
         self.file_length / ROW_SIZE
     }
 }
@@ -276,7 +276,7 @@ impl Table {
             P: AsRef<Path>,
     {
         let pager = Pager::new(&filename)?;
-        let num_rows = pager.get_num_page();
+        let num_rows = pager.get_num_pages();
         trace!("initialize Table for {:?}. num_rows: {}", &filename.as_ref().display(), num_rows);
         Ok(Table { num_rows, pager, root_page_num: 0 })
     }
