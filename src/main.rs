@@ -56,10 +56,10 @@ fn do_meta_command(args: MetaCommandArgs) -> Result<(), MetaCommandResult> {
         ".exit" => Err(MetaCommandResult::Exit),
         ".btree" => {
             show_btree(args.table)
-        },
+        }
         ".constants" => {
             show_constants()
-        },
+        }
         _ => Err(MetaCommandResult::UnrecognizedCommand),
     }
 }
@@ -282,9 +282,8 @@ impl Pager {
         }
     }
 
-    fn flush(&mut self, num_rows: usize) -> Result<(), String> {
+    fn flush(&mut self) -> Result<(), String> {
         let _ = self.file.seek(SeekFrom::Start(0));
-        trace!("flush: num_rows: {}", num_rows);
         trace!("flush: num_pages: {}", self.num_pages);
         for i in 0..self.num_pages {
             match self.flush_page(i) {
@@ -305,7 +304,6 @@ impl Pager {
 }
 
 struct Table {
-    num_rows: usize,
     pager: Pager,
     root_page_num: usize,
 }
@@ -316,9 +314,8 @@ impl Table {
             P: AsRef<Path>,
     {
         let pager = Pager::new(&filename)?;
-        let num_rows = pager.get_num_pages();
-        trace!("initialize Table for {:?}. num_rows: {}", &filename.as_ref().display(), num_rows);
-        Ok(Table { num_rows, pager, root_page_num: 0 })
+        trace!("initialize Table for {:?}", &filename.as_ref().display());
+        Ok(Table { pager, root_page_num: 0 })
     }
 
     fn page_num(&self, row_num: usize) -> usize {
@@ -330,12 +327,8 @@ impl Table {
         rows * ROW_SIZE
     }
 
-    fn is_full(&self) -> bool {
-        self.num_rows >= TABLE_MAX_ROWS
-    }
-
     fn close(&mut self) -> Result<(), String> {
-        self.pager.flush(self.num_rows)
+        self.pager.flush()
     }
 }
 
@@ -446,31 +439,55 @@ enum ExecuteResult {
     TableFull,
     InvalidStatement,
     PageMutFailure,
+    PageNotFound,
+    // RootNodeIsInternal,
+    DuplicateKey,
 }
 
 fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), ExecuteResult> {
     trace!("execute_insert");
-    if table.is_full() {
-        log::error!("table is full");
-        return Err(ExecuteResult::TableFull);
-    }
+    let num_cells = {
+        let node = match table.pager.get_page(table.root_page_num) {
+            Some(BTreeNode::Leaf(page)) => page,
+            // Some(_) => { return Err(ExecuteResult::RootNodeIsInternal); }
+            None => {
+                return Err(ExecuteResult::PageNotFound);
+            }
+        };
+        if node.is_max() {
+            log::error!("table is full");
+            return Err(ExecuteResult::TableFull);
+        }
+        node.num_cells
+    };
+    trace!("execute_insert: num_cells: {}", num_cells);
     let row_to_insert = match &statement.row_to_insert {
         Some(s) => s,
         None => {
             return Err(ExecuteResult::InvalidStatement);
         }
     };
-    let mut cursor = TCursor::table_end(table);
+    let key_to_insert = row_to_insert.id;
+    trace!("execute_insert: key_to_insert: {}", key_to_insert);
+    let mut cursor = TCursor::find_insert_position(table, key_to_insert);
+    trace!("execute_insert: cursor.cell_num: {}", cursor.cell_num);
+    let cell_num = cursor.cell_num;
     match cursor.get_mut() {
         Some(BTreeNode::Leaf(page)) => {
-            page.insert(row_to_insert.id, row_to_insert.clone());
+            if cell_num < num_cells.try_into().unwrap() {
+                let key_at_index = page.key_values[cell_num].key;
+                if key_at_index == key_to_insert {
+                    return Err(ExecuteResult::DuplicateKey);
+                }
+            }
+            log::trace!("row inserted");
+            page.insert_at(cell_num, row_to_insert.id, row_to_insert.clone());
         }
         None => {
             log::error!("cannot get mutable reference to page!");
             return Err(ExecuteResult::PageMutFailure);
         }
     };
-    table.num_rows += 1;
     Ok(())
 }
 
@@ -479,7 +496,7 @@ fn execute_select(_statement: &Statement, table: &mut Table) -> Result<Vec<Row>,
     let mut cursor = TCursor::table_start(table);
     while !cursor.end_of_table {
         let row = match cursor.get_row() {
-            Some(v) => {v.clone()},
+            Some(v) => { v.clone() }
             None => Row::default()
         };
         cursor.advance();
@@ -513,6 +530,12 @@ struct TCursor<'a> {
     end_of_table: bool,
 }
 
+struct CursorOpts {
+    page_num: usize,
+    cell_num: usize,
+    end_of_table: bool,
+}
+
 impl<'a> TCursor<'a> {
     fn table_start(table: &'a mut Table) -> Self {
         trace!("table_start");
@@ -536,21 +559,47 @@ impl<'a> TCursor<'a> {
         }
     }
 
-    fn table_end(table: &'a mut Table) -> Self {
-        let page_num = table.root_page_num;
-        let end_of_table = true;
-        let cell_num = table.pager.get_page(page_num).map_or(0, |page| {
-            match page {
-                BTreeNode::Leaf(page) => {
-                    page.num_cells
-                }
+    fn find_insert_position(table: &'a mut Table, key: u32) -> Self {
+        trace!("find_insert_position");
+        let root_page_num = table.root_page_num;
+        // TODO LeafかInternalで後で分岐する
+        let page = match table.pager.get_page(root_page_num) {
+            Some(BTreeNode::Leaf(v)) => v,
+            None => panic!("page not found"),
+        };
+        let mut left = 0;
+        let mut right = page.num_cells as usize;
+        let mut cursor_opts = CursorOpts{
+            page_num: root_page_num,
+            cell_num: 0,
+            end_of_table: false
+        };
+        while left != right {
+            trace!("find_insert_position: left: {}", left);
+            trace!("find_insert_position: right: {}", right);
+            let index = (left + right) / 2;
+            let current_key = page.key_values[index].key;
+            if key == current_key {
+                cursor_opts.cell_num = index;
+                trace!("find_insert_position: key == current_key: {}", key);
+                break
             }
-        }) as usize;
-        TCursor {
+
+            if key < current_key {
+                right = index;
+            } else {
+                left = index + 1;
+            }
+            cursor_opts.cell_num = left;
+        }
+        trace!("find_insert_position: cursor position: {}", cursor_opts.cell_num);
+        cursor_opts.end_of_table = page.num_cells == left as u32;
+
+        Self {
             table,
-            page_num,
-            end_of_table,
-            cell_num,
+            page_num: cursor_opts.page_num,
+            cell_num: cursor_opts.cell_num,
+            end_of_table: cursor_opts.end_of_table
         }
     }
 
@@ -645,7 +694,7 @@ fn _main<P: AsRef<Path>>(filename: P, r: &mut impl io::BufRead, w: &mut impl io:
                 if input_buffer.buffer.starts_with('.') {
                     let args = MetaCommandArgs {
                         input: &input_buffer.buffer,
-                        table: Some(&mut table)
+                        table: Some(&mut table),
                     };
                     match do_meta_command(args) {
                         Ok(_) => {}
@@ -689,6 +738,14 @@ fn _main<P: AsRef<Path>>(filename: P, r: &mut impl io::BufRead, w: &mut impl io:
                             }
                             Err(ExecuteResult::PageMutFailure) => {
                                 let _ = writeln!(w, "get page mutable ref failed");
+                                break;
+                            }
+                            Err(ExecuteResult::PageNotFound) => {
+                                let _ = writeln!(w, "page not found error");
+                                break;
+                            }
+                            Err(ExecuteResult::DuplicateKey) => {
+                                let _ = writeln!(w, "duplicate key error");
                                 break;
                             }
                         };
@@ -877,9 +934,12 @@ mod test {
 
     #[test]
     fn test_execute_statement_insert_into_full_table() {
+        let mut pager = Pager::new("tmp/test.db").unwrap();
+        if let Some(BTreeNode::Leaf(page)) = pager.get_page_mut(0) {
+            page.num_cells = BTreeLeafNode::NODE_MAX_CELLS as u32;
+        }
         let mut table = Table {
-            num_rows: TABLE_MAX_ROWS,
-            pager: Pager::new("tmp/test.db").unwrap(),
+            pager,
             root_page_num: 0,
         };
         let stmt = Statement::new(StatementType::Insert);
@@ -892,7 +952,6 @@ mod test {
     #[test]
     fn test_execute_statement_insert_without_row() {
         let mut table = Table {
-            num_rows: 0,
             pager: Pager::new("tmp/test.db").unwrap(),
             root_page_num: 0,
         };
@@ -907,7 +966,6 @@ mod test {
     fn test_execute_statement_insert() {
         init();
         let mut table = Table {
-            num_rows: 0,
             pager: Pager::new("tmp/test.db").unwrap(),
             root_page_num: 0,
         };

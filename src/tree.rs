@@ -41,7 +41,11 @@ pub struct BTreeLeafNode {
 
 impl BTreeLeafNode {
     pub(crate) fn get_row(&mut self, cell_num: usize) -> &Row {
-        let diff = (cell_num + 1) - (self.num_cells as usize);
+        let diff = if cell_num + 1 >= self.num_cells as usize {
+            (cell_num + 1) - (self.num_cells as usize)
+        } else {
+            0
+        };
         for _ in 0..diff {
             let new_row = Row::default();
             let kv = KV { key: 0, value: new_row };
@@ -76,6 +80,15 @@ impl BTreeLeafNode {
         self.num_cells += 1;
     }
 
+    pub(crate) fn insert_at(&mut self, index: usize, key: u32, value: Row) {
+        if self.num_cells >= Self::max_cells() {
+            panic!("max cells!");
+        }
+        let kv = KV { key, value };
+        self.key_values.insert(index, kv);
+        self.num_cells += 1;
+    }
+
     pub const NODE_TYPE_SIZE: usize = 1;
     pub const IS_ROOT_SIZE: usize = 1;
     pub const NUM_CELLS_SIZE: usize = 4;
@@ -86,6 +99,10 @@ impl BTreeLeafNode {
     pub const NODE_MAX_CELLS: usize = Self::NODE_SPACE_FOR_CELLS / Self::NODE_CELL_SIZE;
     fn max_cells() -> u32 {
         Self::NODE_MAX_CELLS as u32
+    }
+
+    pub(crate) fn is_max(&self) -> bool {
+        self.num_cells >= Self::max_cells()
     }
 }
 
