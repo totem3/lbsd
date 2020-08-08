@@ -27,14 +27,15 @@ impl TryFrom<u8> for NodeType {
 
 #[derive(Clone)]
 pub enum BTreeNode {
-    Leaf(BTreeLeafNode)
+    Leaf(BTreeLeafNode),
+    Internal(BTreeInternalNode)
 }
 
 #[derive(Clone)]
 pub struct BTreeLeafNode {
     pub node_type: NodeType,
     pub is_root: u8,
-    pub parent: Option<Box<BTreeNode>>,
+    pub parent: Option<u32>,
     pub num_cells: u32,
     pub key_values: Vec<KV>,
 }
@@ -106,18 +107,44 @@ impl BTreeLeafNode {
     }
 }
 
+#[derive(Clone)]
+pub struct BTreeInternalNode {
+    pub node_type: NodeType,
+    pub is_root: u8,
+    pub parent: Option<u32>,
+    pub num_keys: u32,
+    pub right_child: u32,
+    pub key_children: Vec<KC>,
+}
+
+#[derive(Debug, Clone)]
+pub struct KC {
+    key: u32,
+    child: u32,
+}
+
 impl BTreeNode {
     pub(crate) fn serialize(&self, buf: &mut Vec<u8>) {
         match self {
-            BTreeNode::Leaf(leaf) => {
+            BTreeNode::Leaf(page) => {
                 let _ = buf.write(&[NodeType::Leaf as u8]);
-                let _ = buf.write(&[leaf.is_root]);
-                let _ = buf.write_u32::<LittleEndian>(leaf.num_cells);
-                for key_value in &leaf.key_values {
+                let _ = buf.write(&[page.is_root]);
+                let _ = buf.write_u32::<LittleEndian>(page.num_cells);
+                for key_value in &page.key_values {
                     let _ = buf.write_u32::<LittleEndian>(key_value.key);
                     let mut value = vec![];
                     key_value.value.serialize(&mut value);
                     let _ = buf.write(&value);
+                }
+            }
+            BTreeNode::Internal(page) => {
+                let _ = buf.write(&[NodeType::Leaf as u8]);
+                let _ = buf.write(&[page.is_root]);
+                let _ = buf.write_u32::<LittleEndian>(page.num_keys);
+                let _ = buf.write_u32::<LittleEndian>(page.right_child);
+                for key_child in &page.key_children {
+                    let _ = buf.write_u32::<LittleEndian>(key_child.key);
+                    let _ = buf.write_u32::<LittleEndian>(key_child.child);
                 }
             }
         };

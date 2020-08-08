@@ -446,48 +446,51 @@ enum ExecuteResult {
 
 fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), ExecuteResult> {
     trace!("execute_insert");
-    let num_cells = {
-        let node = match table.pager.get_page(table.root_page_num) {
-            Some(BTreeNode::Leaf(page)) => page,
-            // Some(_) => { return Err(ExecuteResult::RootNodeIsInternal); }
-            None => {
-                return Err(ExecuteResult::PageNotFound);
+    let node = match table.pager.get_page(table.root_page_num) {
+        Some(page) => page,
+        None => { return Err(ExecuteResult::PageNotFound); }
+    };
+    match node {
+        BTreeNode::Leaf(page) => {
+            if page.is_max() {
+                log::error!("table is full");
+                return Err(ExecuteResult::TableFull);
             }
-        };
-        if node.is_max() {
-            log::error!("table is full");
-            return Err(ExecuteResult::TableFull);
-        }
-        node.num_cells
-    };
-    trace!("execute_insert: num_cells: {}", num_cells);
-    let row_to_insert = match &statement.row_to_insert {
-        Some(s) => s,
-        None => {
-            return Err(ExecuteResult::InvalidStatement);
-        }
-    };
-    let key_to_insert = row_to_insert.id;
-    trace!("execute_insert: key_to_insert: {}", key_to_insert);
-    let mut cursor = TCursor::find_insert_position(table, key_to_insert);
-    trace!("execute_insert: cursor.cell_num: {}", cursor.cell_num);
-    let cell_num = cursor.cell_num;
-    match cursor.get_mut() {
-        Some(BTreeNode::Leaf(page)) => {
-            if cell_num < num_cells.try_into().unwrap() {
-                let key_at_index = page.key_values[cell_num].key;
-                if key_at_index == key_to_insert {
-                    return Err(ExecuteResult::DuplicateKey);
+            let num_cells = page.num_cells ;
+            trace!("execute_insert: num_cells: {}", num_cells);
+            let row_to_insert = match &statement.row_to_insert {
+                Some(s) => s,
+                None => {
+                    return Err(ExecuteResult::InvalidStatement);
                 }
-            }
-            log::trace!("row inserted");
-            page.insert_at(cell_num, row_to_insert.id, row_to_insert.clone());
+            };
+            let key_to_insert = row_to_insert.id;
+            trace!("execute_insert: key_to_insert: {}", key_to_insert);
+            let mut cursor = TCursor::find_insert_position(table, key_to_insert);
+            trace!("execute_insert: cursor.cell_num: {}", cursor.cell_num);
+            let cell_num = cursor.cell_num;
+            match cursor.get_mut() {
+                Some(BTreeNode::Leaf(page)) => {
+                    if cell_num < num_cells.try_into().unwrap() {
+                        let key_at_index = page.key_values[cell_num].key;
+                        if key_at_index == key_to_insert {
+                            return Err(ExecuteResult::DuplicateKey);
+                        }
+                    }
+                    log::trace!("row inserted");
+                    page.insert_at(cell_num, row_to_insert.id, row_to_insert.clone());
+                }
+                Some(BTreeNode::Internal(_)) => {}
+                None => {
+                    log::error!("cannot get mutable reference to page!");
+                    return Err(ExecuteResult::PageMutFailure);
+                }
+            };
         }
-        None => {
-            log::error!("cannot get mutable reference to page!");
-            return Err(ExecuteResult::PageMutFailure);
+        BTreeNode::Internal(page) => {
+
         }
-    };
+    }
     Ok(())
 }
 
@@ -548,6 +551,9 @@ impl<'a> TCursor<'a> {
                 BTreeNode::Leaf(page) => {
                     page.num_cells == 0
                 }
+                BTreeNode::Internal(_) => {
+                    false
+                }
             }
         });
         trace!("table_start: end_of_table: {}", end_of_table);
@@ -565,14 +571,15 @@ impl<'a> TCursor<'a> {
         // TODO LeafかInternalで後で分岐する
         let page = match table.pager.get_page(root_page_num) {
             Some(BTreeNode::Leaf(v)) => v,
+            Some(BTreeNode::Internal(_)) => { unimplemented!() }
             None => panic!("page not found"),
         };
         let mut left = 0;
         let mut right = page.num_cells as usize;
-        let mut cursor_opts = CursorOpts{
+        let mut cursor_opts = CursorOpts {
             page_num: root_page_num,
             cell_num: 0,
-            end_of_table: false
+            end_of_table: false,
         };
         while left != right {
             trace!("find_insert_position: left: {}", left);
@@ -582,7 +589,7 @@ impl<'a> TCursor<'a> {
             if key == current_key {
                 cursor_opts.cell_num = index;
                 trace!("find_insert_position: key == current_key: {}", key);
-                break
+                break;
             }
 
             if key < current_key {
@@ -599,7 +606,7 @@ impl<'a> TCursor<'a> {
             table,
             page_num: cursor_opts.page_num,
             cell_num: cursor_opts.cell_num,
-            end_of_table: cursor_opts.end_of_table
+            end_of_table: cursor_opts.end_of_table,
         }
     }
 
@@ -616,6 +623,7 @@ impl<'a> TCursor<'a> {
                     self.end_of_table = true
                 }
             }
+            BTreeNode::Internal(_) => { unimplemented!() }
         }
     }
 
@@ -649,6 +657,7 @@ impl<'a> TCursor<'a> {
                 BTreeNode::Leaf(page) => {
                     page.get_row(cell_num)
                 }
+                BTreeNode::Internal(_) => { unimplemented!() }
             }
         })
     }
@@ -1001,6 +1010,7 @@ mod test {
                     Some(())
                 });
             }
+            Some(BTreeNode::Internal(_)) => { unimplemented!() }
             None => {}
         };
         assert_eq!(buf, expected);
