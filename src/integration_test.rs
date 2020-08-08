@@ -2,6 +2,7 @@
 
 use super::*;
 use std::io::{BufReader, Write};
+use std::fs;
 
 fn init() {
     let _ = env_logger::builder().is_test(true).try_init();
