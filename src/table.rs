@@ -1,7 +1,7 @@
 use std::path::Path;
 use log::{trace};
 use crate::{ROWS_PER_PAGE, ROW_SIZE, TABLE_MAX_PAGES, PAGE_SIZE, Row};
-use crate::tree::BTreeNode;
+use crate::tree::{BTreeNode, BTreeLeafNode, KV, BTreeInternalNode};
 use std::fs::{File, OpenOptions};
 use std::fs;
 use std::convert::TryInto;
@@ -74,6 +74,22 @@ impl Pager {
         })
     }
 
+    pub(crate) fn new_internal_page(&mut self, new_page_num: usize) -> Option<&Page> {
+        log::trace!("new_page");
+        trace!("new_page: page_num: {}", new_page_num);
+        let page = BTreeNode::Internal(BTreeInternalNode::default());
+        self.pages[new_page_num] = Some(page);
+        self.pages[new_page_num].as_ref()
+    }
+
+    pub(crate) fn new_internal_page_mut(&mut self, new_page_num: usize) -> Option<&mut Page> {
+        log::trace!("new_page");
+        trace!("new_page: page_num: {}", new_page_num);
+        let page = BTreeNode::Internal(BTreeInternalNode::default());
+        self.pages[new_page_num] = Some(page);
+        self.pages[new_page_num].as_mut()
+    }
+
     pub(crate) fn get_page(&mut self, page_num: usize) -> Option<&Page> {
         log::trace!("get_page");
         if self.pages[page_num].is_some() {
@@ -103,6 +119,7 @@ impl Pager {
             };
         }
         let mut buf = vec![0u8; PAGE_SIZE];
+        // fileのサイズを超えていたら何も読み込まない（けど試行するだけむだなので FIXME )
         match self.file.read(&mut buf) {
             Ok(n) => {
                 trace!("read from file succeeded. read {} bytes", n);
@@ -150,6 +167,74 @@ impl Pager {
 
     fn get_num_pages(&self) -> usize {
         self.file_length / ROW_SIZE
+    }
+
+    const LEAF_NODE_RIGHT_SPLIT_COUNT: usize = (BTreeLeafNode::NODE_MAX_CELLS + 1) / 2;
+    const LEAF_NODE_LEFT_SPLIT_COUNT: usize = (BTreeLeafNode::NODE_MAX_CELLS + 1) - Self::LEAF_NODE_RIGHT_SPLIT_COUNT;
+
+    pub(crate) fn split_and_insert(&mut self, page_num: usize, cell_num: usize, key: u32, value: Row) -> Option<usize> {
+        trace!("Pager::split_and_insert!");
+        let parent_page_num = self.new_page_num();
+        let old_node = self.get_page_mut(page_num).expect("split_and_insert: current page not found!");
+        let mut right_values = Vec::with_capacity(Self::LEAF_NODE_RIGHT_SPLIT_COUNT);
+        trace!("target page_num: {}", page_num);
+        trace!("target cell_num: {}", cell_num);
+
+        // ここでコピーしないとmutな借用をし続けてしまうのでコピーしておく
+        let original_is_root = old_node.is_root();
+        let original_parent = old_node.get_parent();
+        let left_max_key;
+
+        if let BTreeNode::Leaf(node) = old_node {
+            trace!("Pager::split_and_insert: just insert to old node");
+            node.insert_at(cell_num, key, value);
+            trace!("Pager::split_and_insert: split current key_values");
+            let cur_kv = node.key_values.clone();
+            let (left, right) = cur_kv.split_at(Self::LEAF_NODE_LEFT_SPLIT_COUNT);
+            node.key_values = left.to_vec();
+            node.num_cells = Self::LEAF_NODE_LEFT_SPLIT_COUNT as u32;
+            node.parent = parent_page_num as u32;
+            node.is_root = 0;
+            trace!("Pager::split_and_insert: left num_cells: {}", node.num_cells);
+            trace!("Pager::split_and_insert: left parent: {}", node.parent);
+            left_max_key = node.max_key();
+            right_values = right.to_vec();
+        } else {
+            unimplemented!("need to implement split internal node!");
+        }
+
+        let right_page_num = self.new_page_num();
+        let new_node = self.get_page_mut(right_page_num).expect("split_and_insert: failed to allocate new page!");
+        if let BTreeNode::Leaf(node) = new_node {
+            node.key_values = right_values;
+            node.num_cells = Self::LEAF_NODE_RIGHT_SPLIT_COUNT as u32;
+            node.parent = parent_page_num as u32;
+        } else {
+            unreachable!("new node must be leaf");
+        }
+
+        let new_parent = self.new_internal_page_mut(parent_page_num).expect("split_and_insert: failed to allocate new parent!");
+        if let BTreeNode::Internal(node) = new_parent {
+            node.is_root = original_is_root;
+            node.parent = original_parent;
+            node.num_keys = 1;
+            node.right_child = right_page_num as u32;
+            node.insert(left_max_key, page_num as u32)
+        }
+
+        trace!("Pager::split_and_insert: done");
+        if original_is_root > 0 {
+            Some(parent_page_num)
+        } else {
+            None
+        }
+    }
+
+    // とりあえず今は末尾を返す
+    fn new_page_num(&mut self) -> usize {
+        let val = self.num_pages;
+        self.num_pages += 1;
+        val
     }
 }
 
@@ -294,6 +379,11 @@ impl<'a> TCursor<'a> {
         let page_num = self.page_num;
         trace!("TCursor::get page_num: {}", page_num);
         self.table.pager.get_page(page_num)
+    }
+
+    pub(crate) fn split_and_insert(&mut self, key: u32, value: Row) -> Option<usize> {
+        trace!("TCursor::split_and_insert");
+        self.table.pager.split_and_insert(self.page_num, self.cell_num, key, value)
     }
 }
 

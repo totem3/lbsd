@@ -307,11 +307,7 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), Execut
     };
     match node {
         BTreeNode::Leaf(page) => {
-            if page.is_max() {
-                log::error!("table is full");
-                return Err(ExecuteResult::TableFull);
-            }
-            let num_cells = page.num_cells ;
+            let num_cells = page.num_cells;
             trace!("execute_insert: num_cells: {}", num_cells);
             let row_to_insert = match &statement.row_to_insert {
                 Some(s) => s,
@@ -319,11 +315,20 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), Execut
                     return Err(ExecuteResult::InvalidStatement);
                 }
             };
+            let is_max = page.is_max();
             let key_to_insert = row_to_insert.id;
             trace!("execute_insert: key_to_insert: {}", key_to_insert);
             let mut cursor = TCursor::find_insert_position(table, key_to_insert);
             trace!("execute_insert: cursor.cell_num: {}", cursor.cell_num);
             let cell_num = cursor.cell_num;
+
+            if is_max {
+                log::debug!("table is full");
+                if let Some(root) = cursor.split_and_insert(key_to_insert, row_to_insert.clone()) {
+                    cursor.table.root_page_num = root;
+                }
+                return Ok(());
+            }
             match cursor.get_mut() {
                 Some(BTreeNode::Leaf(page)) => {
                     if cell_num < num_cells.try_into().unwrap() {
@@ -342,9 +347,7 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), Execut
                 }
             };
         }
-        BTreeNode::Internal(page) => {
-
-        }
+        BTreeNode::Internal(page) => {}
     }
     Ok(())
 }
@@ -663,7 +666,8 @@ mod test {
             pager,
             root_page_num: 0,
         };
-        let stmt = Statement::new(StatementType::Insert);
+        let mut stmt = Statement::new(StatementType::Insert);
+        stmt.row_to_insert = Some(Row::default());
         let result = execute_statement(&stmt, &mut table);
         assert!(result.is_err());
         let err = result.err().unwrap();

@@ -28,7 +28,7 @@ impl TryFrom<u8> for NodeType {
 #[derive(Clone)]
 pub enum BTreeNode {
     Leaf(BTreeLeafNode),
-    Internal(BTreeInternalNode)
+    Internal(BTreeInternalNode),
 }
 
 #[derive(Clone)]
@@ -83,9 +83,10 @@ impl BTreeLeafNode {
 
     pub(crate) fn insert_at(&mut self, index: usize, key: u32, value: Row) {
         if self.num_cells >= Self::max_cells() {
-            panic!("max cells!");
+            log::trace!("max cells!");
         }
         let kv = KV { key, value };
+        log::trace!("BTreeLeafNode::insert_at: insert at {}. key_values length is {}", index, self.key_values.len());
         self.key_values.insert(index, kv);
         self.num_cells += 1;
     }
@@ -105,6 +106,13 @@ impl BTreeLeafNode {
     pub(crate) fn is_max(&self) -> bool {
         self.num_cells >= Self::max_cells()
     }
+
+    pub(crate) fn max_key(&self) -> u32 {
+        match self.key_values.last() {
+            Some(kv) => { kv.key }
+            None => 0
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -117,10 +125,41 @@ pub struct BTreeInternalNode {
     pub key_children: Vec<KC>,
 }
 
+impl BTreeInternalNode {
+    pub fn new(is_root: u8, parent: u32) -> Self {
+        BTreeInternalNode {
+            node_type: NodeType::Internal,
+            is_root,
+            parent,
+            num_keys: 0,
+            right_child: 0,
+            key_children: vec![],
+        }
+    }
+
+    pub(crate) fn max_key(&self) -> u32 {
+        match self.key_children.get(self.num_keys as usize) {
+            Some(kc) => { kc.key }
+            None => 0
+        }
+    }
+
+    pub(crate) fn insert(&mut self, key: u32, child: u32) {
+        let kc = KC { child, key };
+        self.key_children.push(kc);
+    }
+}
+
+impl Default for BTreeInternalNode {
+    fn default() -> Self {
+        BTreeInternalNode::new(0, 0)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct KC {
-    key: u32,
     child: u32,
+    key: u32,
 }
 
 impl BTreeNode {
@@ -150,6 +189,27 @@ impl BTreeNode {
                 }
             }
         };
+    }
+
+    pub(crate) fn is_root(&self) -> u8 {
+        match self {
+            BTreeNode::Leaf(node) => node.is_root,
+            BTreeNode::Internal(node) => node.is_root,
+        }
+    }
+
+    pub(crate) fn get_parent(&self) -> u32 {
+        match self {
+            BTreeNode::Leaf(node) => node.parent,
+            BTreeNode::Internal(node) => node.parent,
+        }
+    }
+
+    pub(crate) fn max_key(&self) -> u32 {
+        match self {
+            BTreeNode::Leaf(node) => node.max_key(),
+            BTreeNode::Internal(node) => node.max_key(),
+        }
     }
 }
 
@@ -190,7 +250,7 @@ impl From<&[u8]> for BTreeNode {
         } else {
             buf
         };
-        trace!("BTreeNode::from::<u8>: buf:\n{:?}", buf);
+        // trace!("BTreeNode::from::<u8>: buf:\n{:?}", buf);
         let node_type = match NodeType::try_from(buf[0]) {
             Ok(v) => { v }
             Err(e) => panic!(e),
