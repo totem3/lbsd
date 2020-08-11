@@ -35,7 +35,7 @@ pub enum BTreeNode {
 pub struct BTreeLeafNode {
     pub node_type: NodeType,
     pub is_root: u8,
-    pub parent: Option<u32>,
+    pub parent: u32,
     pub num_cells: u32,
     pub key_values: Vec<KV>,
 }
@@ -111,7 +111,7 @@ impl BTreeLeafNode {
 pub struct BTreeInternalNode {
     pub node_type: NodeType,
     pub is_root: u8,
-    pub parent: Option<u32>,
+    pub parent: u32,
     pub num_keys: u32,
     pub right_child: u32,
     pub key_children: Vec<KC>,
@@ -129,6 +129,7 @@ impl BTreeNode {
             BTreeNode::Leaf(page) => {
                 let _ = buf.write(&[NodeType::Leaf as u8]);
                 let _ = buf.write(&[page.is_root]);
+                let _ = buf.write_u32::<LittleEndian>(page.parent);
                 let _ = buf.write_u32::<LittleEndian>(page.num_cells);
                 for key_value in &page.key_values {
                     let _ = buf.write_u32::<LittleEndian>(key_value.key);
@@ -140,6 +141,7 @@ impl BTreeNode {
             BTreeNode::Internal(page) => {
                 let _ = buf.write(&[NodeType::Leaf as u8]);
                 let _ = buf.write(&[page.is_root]);
+                let _ = buf.write_u32::<LittleEndian>(page.parent);
                 let _ = buf.write_u32::<LittleEndian>(page.num_keys);
                 let _ = buf.write_u32::<LittleEndian>(page.right_child);
                 for key_child in &page.key_children {
@@ -162,7 +164,7 @@ fn test_serialize() {
     let node = BTreeNode::Leaf(BTreeLeafNode {
         node_type: NodeType::Leaf,
         is_root: 0,
-        parent: None,
+        parent: 0,
         num_cells: 1,
         key_values: vec![key_value],
     });
@@ -184,7 +186,7 @@ impl From<&[u8]> for BTreeNode {
         // 空のバッファが渡されたらLeafとして初期化する
         let buf = if buf.len() < 6 {
             trace!("BTreeNode::from::<u8>: given buffer is empty");
-            &[1, 1, 0, 0, 0, 0]
+            &[1, 1, 0, 0, 0, 0, 0, 0, 0, 0]
         } else {
             buf
         };
@@ -197,8 +199,8 @@ impl From<&[u8]> for BTreeNode {
 
         let is_root = buf[1];
         trace!("BTreeNode::from::<u8>: is_root: {}", is_root);
-        let parent = None; // FIXME どうすればいいのかよくわからん
-        let num_cells: u32 = (&buf[2..6]).read_u32::<LittleEndian>().expect("num_cells must be u32");
+        let parent: u32 = (&buf[2..6]).read_u32::<LittleEndian>().expect("parent must be u32");
+        let num_cells: u32 = (&buf[6..10]).read_u32::<LittleEndian>().expect("num_cells must be u32");
         trace!("BTreeNode::from::<u8>: num_cells: {}", num_cells);
 
         match node_type {
