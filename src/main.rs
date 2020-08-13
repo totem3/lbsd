@@ -69,18 +69,42 @@ fn show_btree(table: Option<&mut Table>) -> Result<(), MetaCommandResult> {
     if let Some(table) = table {
         println!("Tree:");
         let page_num = table.root_page_num;
-        if let Some(BTreeNode::Leaf(page)) = table.pager.get_page(page_num) {
-            println!("leaf (size {})", page.num_cells);
-            for (i, key_value) in page.key_values.iter().enumerate() {
-                println!(" - {} : {}", i, key_value.key);
-            }
-        } else {
-            println!("page not found");
-        }
+        let _ = show_btree_node(table, page_num, "");
         Ok(())
     } else {
         Err(MetaCommandResult::TableNotGiven)
     }
+}
+
+fn show_btree_node(table: &mut Table, page_num: usize, indent: &str) -> Result<(), MetaCommandResult> {
+    let page = table.pager.get_page(page_num).clone();
+    let values = if let Some(node) = page {
+        match node {
+            BTreeNode::Leaf(node) => {
+                println!("{}leaf (size {})", indent, node.num_cells);
+                for (i, key_value) in node.key_values.iter().enumerate() {
+                    println!("{} - {} : {}", indent, i, key_value.key);
+                }
+                None
+            }
+            BTreeNode::Internal(node) => {
+                println!("{}internal (size {})", indent, node.num_keys);
+                Some((node.key_children.clone(), node.right_child))
+            }
+        }
+    } else {
+        return Ok(());
+    };
+
+    if let Some(values) = values {
+        for kc in values.0 {
+            let _ = show_btree_node(table, kc.child as usize, &(indent.to_owned() + ""));
+            println!("{} - key : {}", indent, kc.key);
+        }
+        let right_child = values.1;
+        let _ = show_btree_node(table, right_child as usize, &(indent.to_owned() + ""));
+    }
+    Ok(())
 }
 
 fn show_constants() -> Result<(), MetaCommandResult> {
