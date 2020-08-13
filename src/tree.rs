@@ -1,4 +1,4 @@
-use std::io::{Write};
+use std::io::{Read,Write};
 use crate::{Row, ROW_SIZE, PAGE_SIZE};
 use byteorder::{ReadBytesExt, LittleEndian, WriteBytesExt};
 use std::convert::TryFrom;
@@ -158,8 +158,8 @@ impl Default for BTreeInternalNode {
 
 #[derive(Debug, Clone)]
 pub struct KC {
-    child: u32,
-    key: u32,
+    pub child: u32,
+    pub key: u32,
 }
 
 impl BTreeNode {
@@ -244,23 +244,23 @@ impl From<&[u8]> for BTreeNode {
     fn from(buf: &[u8]) -> Self {
         trace!("BTreeNode::from::<u8>");
         // 空のバッファが渡されたらLeafとして初期化する
-        let buf = if buf.len() < 6 {
+        let mut buf = if buf.len() < 6 {
             trace!("BTreeNode::from::<u8>: given buffer is empty");
             &[1, 1, 0, 0, 0, 0, 0, 0, 0, 0]
         } else {
             buf
         };
         // trace!("BTreeNode::from::<u8>: buf:\n{:?}", buf);
-        let node_type = match NodeType::try_from(buf[0]) {
+        let node_type = match NodeType::try_from(buf.read_u8().expect("node_type must be u8")) {
             Ok(v) => { v }
             Err(e) => panic!(e),
         };
         trace!("BTreeNode::from::<u8>: node_type: {:?}", node_type);
 
-        let is_root = buf[1];
+        let is_root = buf.read_u8().expect("is_root must be u8");
         trace!("BTreeNode::from::<u8>: is_root: {}", is_root);
-        let parent: u32 = (&buf[2..6]).read_u32::<LittleEndian>().expect("parent must be u32");
-        let num_cells: u32 = (&buf[6..10]).read_u32::<LittleEndian>().expect("num_cells must be u32");
+        let parent: u32 = buf.read_u32::<LittleEndian>().expect("parent must be u32");
+        let num_cells: u32 = buf.read_u32::<LittleEndian>().expect("num_cells must be u32");
         trace!("BTreeNode::from::<u8>: num_cells: {}", num_cells);
 
         match node_type {
@@ -268,13 +268,13 @@ impl From<&[u8]> for BTreeNode {
                 unimplemented!()
             }
             NodeType::Leaf => {
-                let mut index = 6;
                 let mut key_values = vec![];
                 for _ in 0..num_cells {
-                    let key = (&buf[index..index + 4]).read_u32::<LittleEndian>().expect("key must be u32");
-                    index += 4;
-                    let value = Row::deserialize(&buf[index..index + ROW_SIZE]);
-                    index += ROW_SIZE;
+                    let key = buf.read_u32::<LittleEndian>().expect("key must be u32");
+                    let mut row_buffer = vec![0; ROW_SIZE];
+                    let n = buf.read(&mut row_buffer).expect("read row failed");
+                    trace!("BTreeNode::from:::<u8>: read row bytes: {}", n);
+                    let value = Row::deserialize(&row_buffer);
                     let kv = KV { key, value };
                     key_values.push(kv);
                 }

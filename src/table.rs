@@ -17,9 +17,17 @@ impl Table {
         where
             P: AsRef<Path>,
     {
-        let pager = Pager::new(&filename)?;
-        trace!("initialize Table for {:?}", &filename.as_ref().display());
-        Ok(Table { pager, root_page_num: 0 })
+        let mut pager = Pager::new(&filename)?;
+        trace!("Table::new: initialize Table for {:?}", &filename.as_ref().display());
+        let mut root_page_num = 0;
+        if pager.num_pages == 1 {
+            trace!("Table::new: new_table, initialize it");
+            if let Some(BTreeNode::Leaf(node)) =  pager.get_page_mut(0) {
+                node.is_root = 1
+            }
+        }
+        trace!("Table::new: root_page_num: {}", root_page_num);
+        Ok(Table { pager, root_page_num })
     }
 
     pub(crate) fn page_num(&self, row_num: usize) -> usize {
@@ -176,7 +184,7 @@ impl Pager {
         trace!("Pager::split_and_insert!");
         let parent_page_num = self.new_page_num();
         let old_node = self.get_page_mut(page_num).expect("split_and_insert: current page not found!");
-        let mut right_values = Vec::with_capacity(Self::LEAF_NODE_RIGHT_SPLIT_COUNT);
+        let right_values;
         trace!("target page_num: {}", page_num);
         trace!("target cell_num: {}", cell_num);
 
@@ -224,8 +232,10 @@ impl Pager {
 
         trace!("Pager::split_and_insert: done");
         if original_is_root > 0 {
+            trace!("Pager::split_and_insert: original was root");
             Some(parent_page_num)
         } else {
+            trace!("Pager::split_and_insert: original was not root");
             None
         }
     }
@@ -369,7 +379,7 @@ impl<'a> TCursor<'a> {
                 BTreeNode::Leaf(page) => {
                     page.get_row(cell_num)
                 }
-                BTreeNode::Internal(_) => { unimplemented!() }
+                BTreeNode::Internal(page) => { unimplemented!() }
             }
         })
     }
