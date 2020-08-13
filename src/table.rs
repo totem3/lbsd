@@ -1,7 +1,7 @@
 use std::path::Path;
 use log::{trace};
 use crate::{ROWS_PER_PAGE, ROW_SIZE, TABLE_MAX_PAGES, PAGE_SIZE, Row};
-use crate::tree::{BTreeNode, BTreeLeafNode, KV, BTreeInternalNode};
+use crate::tree::{BTreeNode, BTreeLeafNode, BTreeInternalNode};
 use std::fs::{File, OpenOptions};
 use std::fs;
 use std::convert::TryInto;
