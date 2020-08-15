@@ -1,4 +1,4 @@
-use std::io::{Read,Write};
+use std::io::{Read, Write};
 use crate::{Row, ROW_SIZE, PAGE_SIZE};
 use byteorder::{ReadBytesExt, LittleEndian, WriteBytesExt};
 use std::convert::TryFrom;
@@ -41,18 +41,18 @@ pub struct BTreeLeafNode {
 }
 
 impl BTreeLeafNode {
-    pub(crate) fn get_row(&mut self, cell_num: usize) -> &Row {
-        let diff = if cell_num + 1 >= self.num_cells as usize {
-            (cell_num + 1) - (self.num_cells as usize)
-        } else {
-            0
-        };
-        for _ in 0..diff {
-            let new_row = Row::default();
-            let kv = KV { key: 0, value: new_row };
-            self.key_values.push(kv);
-        }
-        self.num_cells = self.key_values.len() as u32;
+    pub(crate) fn get_row(&self, cell_num: usize) -> &Row {
+        // let diff = if cell_num + 1 >= self.num_cells as usize {
+        //     (cell_num + 1) - (self.num_cells as usize)
+        // } else {
+        //     0
+        // };
+        // for _ in 0..diff {
+        //     let new_row = Row::default();
+        //     let kv = KV { key: 0, value: new_row };
+        //     self.key_values.push(kv);
+        // }
+        // self.num_cells = self.key_values.len() as u32;
         self.key_values[cell_num].value.borrow()
     }
 
@@ -148,6 +148,28 @@ impl BTreeInternalNode {
         let kc = KC { child, key };
         self.key_children.push(kc);
     }
+
+    /// 次のページを返す。Leafまで再帰的に辿るのはPagerにやらせる
+    pub(crate) fn find_key(&self, key: u32) -> u32 {
+        let mut left = 0;
+        let mut right = self.key_children.len();
+
+        while left != right {
+            let index = (left + right) / 2;
+            let key_to_right = self.key_children[index].key;
+            if key_to_right >= key {
+                right = index;
+            } else {
+                left = index + 1;
+            }
+        }
+
+        if self.key_children.len() < left {
+            self.key_children[left].key
+        } else {
+            self.right_child
+        }
+    }
 }
 
 impl Default for BTreeInternalNode {
@@ -178,17 +200,21 @@ impl BTreeNode {
                 }
             }
             BTreeNode::Internal(page) => {
-                let _ = buf.write(&[NodeType::Leaf as u8]);
+                let _ = buf.write(&[NodeType::Internal as u8]);
                 let _ = buf.write(&[page.is_root]);
                 let _ = buf.write_u32::<LittleEndian>(page.parent);
                 let _ = buf.write_u32::<LittleEndian>(page.num_keys);
                 let _ = buf.write_u32::<LittleEndian>(page.right_child);
                 for key_child in &page.key_children {
-                    let _ = buf.write_u32::<LittleEndian>(key_child.key);
                     let _ = buf.write_u32::<LittleEndian>(key_child.child);
+                    let _ = buf.write_u32::<LittleEndian>(key_child.key);
                 }
             }
         };
+        if PAGE_SIZE > buf.len() {
+            let padding = vec![0; PAGE_SIZE - buf.len()];
+            let _ = buf.write(&padding);
+        }
     }
 
     pub(crate) fn is_root(&self) -> u8 {
@@ -260,14 +286,32 @@ impl From<&[u8]> for BTreeNode {
         let is_root = buf.read_u8().expect("is_root must be u8");
         trace!("BTreeNode::from::<u8>: is_root: {}", is_root);
         let parent: u32 = buf.read_u32::<LittleEndian>().expect("parent must be u32");
-        let num_cells: u32 = buf.read_u32::<LittleEndian>().expect("num_cells must be u32");
-        trace!("BTreeNode::from::<u8>: num_cells: {}", num_cells);
 
         match node_type {
             NodeType::Internal => {
-                unimplemented!()
+                let num_keys: u32 = buf.read_u32::<LittleEndian>().expect("num_keys must be u32");
+                trace!("BTreeNode::from::<u8>: num_cells: {}", num_keys);
+                let right_child: u32 = buf.read_u32::<LittleEndian>().expect("right_keys must be u32");
+                let mut key_children = vec![];
+                for _ in 0..num_keys {
+                    let child = buf.read_u32::<LittleEndian>().expect("child must be u32");
+                    let key = buf.read_u32::<LittleEndian>().expect("key must be u32");
+                    let kc = KC { key, child };
+                    key_children.push(kc);
+                }
+                let node = BTreeInternalNode {
+                    node_type,
+                    is_root,
+                    parent,
+                    num_keys,
+                    right_child,
+                    key_children
+                };
+                BTreeNode::Internal(node)
             }
             NodeType::Leaf => {
+                let num_cells: u32 = buf.read_u32::<LittleEndian>().expect("num_cells must be u32");
+                trace!("BTreeNode::from::<u8>: num_cells: {}", num_cells);
                 let mut key_values = vec![];
                 for _ in 0..num_cells {
                     let key = buf.read_u32::<LittleEndian>().expect("key must be u32");
@@ -278,14 +322,14 @@ impl From<&[u8]> for BTreeNode {
                     let kv = KV { key, value };
                     key_values.push(kv);
                 }
-                let leaf: BTreeLeafNode = BTreeLeafNode {
+                let node: BTreeLeafNode = BTreeLeafNode {
                     node_type,
                     is_root,
                     parent,
                     num_cells,
                     key_values,
                 };
-                BTreeNode::Leaf(leaf)
+                BTreeNode::Leaf(node)
             }
         }
     }

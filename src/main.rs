@@ -7,13 +7,13 @@ extern crate log;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::convert::TryInto;
 use std::fmt;
-use std::io::{self, BufRead, Cursor, Read};
+use std::io::{self, BufRead, Read};
 use std::path::Path;
 use std::process::exit;
 
 use log::trace;
 use crate::tree::{BTreeNode, BTreeLeafNode};
-use crate::table::{Table, TCursor};
+use crate::table::{Table, Cursor};
 
 pub mod tree;
 pub mod table;
@@ -98,11 +98,11 @@ fn show_btree_node(table: &mut Table, page_num: usize, indent: &str) -> Result<(
 
     if let Some(values) = values {
         for kc in values.0 {
-            let _ = show_btree_node(table, kc.child as usize, &(indent.to_owned() + ""));
+            let _ = show_btree_node(table, kc.child as usize, &(indent.to_owned() + "  "));
             println!("{} - key : {}", indent, kc.key);
         }
         let right_child = values.1;
-        let _ = show_btree_node(table, right_child as usize, &(indent.to_owned() + ""));
+        let _ = show_btree_node(table, right_child as usize, &(indent.to_owned() + "  "));
     }
     Ok(())
 }
@@ -182,7 +182,7 @@ impl Row {
         buf.extend_from_slice(&self.email);
     }
     fn deserialize(input: &[u8]) -> Row {
-        let mut rdr = Cursor::new(input);
+        let mut rdr = io::Cursor::new(input);
         let id = rdr.read_u32::<LittleEndian>().unwrap();
         let mut username = [0u8; 32];
         let _ = rdr.read(&mut username).unwrap();
@@ -315,7 +315,6 @@ fn prepare_statement(input: &InputBuffer) -> Result<Statement, PrepareError> {
 
 #[derive(Debug, PartialEq, Eq)]
 enum ExecuteResult {
-    TableFull,
     InvalidStatement,
     PageMutFailure,
     PageNotFound,
@@ -342,7 +341,7 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), Execut
             let is_max = page.is_max();
             let key_to_insert = row_to_insert.id;
             trace!("execute_insert: key_to_insert: {}", key_to_insert);
-            let mut cursor = TCursor::find_insert_position(table, key_to_insert);
+            let mut cursor = Cursor::find_insert_position(table, table.root_page_num, key_to_insert);
             trace!("execute_insert: cursor.cell_num: {}", cursor.cell_num);
             let cell_num = cursor.cell_num;
 
@@ -353,7 +352,7 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), Execut
                 }
                 return Ok(());
             }
-            match cursor.get_mut() {
+            match cursor.get_page_mut() {
                 Some(BTreeNode::Leaf(page)) => {
                     if cell_num < num_cells.try_into().unwrap() {
                         let key_at_index = page.key_values[cell_num].key;
@@ -371,29 +370,47 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), Execut
                 }
             };
         }
-        BTreeNode::Internal(page) => {}
+        BTreeNode::Internal(_) => {}
     }
     Ok(())
 }
 
-fn execute_select(_statement: &Statement, table: &mut Table) -> Result<Vec<Row>, ExecuteResult> {
-    let mut rows = Vec::new();
-    let mut cursor = TCursor::table_start(table);
+fn execute_select(_statement: &Statement, table: &mut Table, w: &mut impl io::Write) -> Result<Vec<Row>, ExecuteResult> {
+    trace!("execute_select");
+    let mut cursor = Cursor::table_start(table);
+    select_all(&mut cursor, w);
+    Ok(vec![])
+}
+
+fn select_all(cursor: &mut Cursor, w: &mut impl io::Write) {
+    trace!("select_all");
     while !cursor.end_of_table {
-        let row = match cursor.get_row() {
-            Some(v) => { v.clone() }
-            None => Row::default()
+        match cursor.get_page() {
+            Some(BTreeNode::Leaf(_)) => {
+                trace!("select_all: node is leaf");
+                if let Some(row) = cursor.get_row() {
+                    let _ = writeln!(w, "{:?}", row);
+                }
+                cursor.advance();
+            }
+            Some(BTreeNode::Internal(page)) => {
+                trace!("select_all: node is internal");
+                let kc = page.key_children.first().expect("select_all: no children");
+                trace!("select_all: key = {}", kc.key);
+                cursor.page_num = kc.child as usize;
+                cursor.cell_num = 0;
+                trace!("select_all: page_num = {}", cursor.page_num);
+                select_all(cursor, w);
+            }
+            None => {
+                cursor.advance();
+            }
         };
-        cursor.advance();
-        // log::error!("bytes: {:?}", bytes);
-        log::trace!("{:?}", row);
-        rows.push(row);
     }
-    Ok(rows)
 }
 
 // テストのため一時的にVec<Row>を返すようにしておく
-fn execute_statement(statement: &Statement, table: &mut Table) -> Result<Vec<Row>, ExecuteResult> {
+fn execute_statement(statement: &Statement, table: &mut Table, w: &mut impl io::Write) -> Result<Vec<Row>, ExecuteResult> {
     match statement.st_type {
         StatementType::Insert => {
             // テストのためselectでRowsを返したいので一時的に合わせておく
@@ -403,7 +420,7 @@ fn execute_statement(statement: &Statement, table: &mut Table) -> Result<Vec<Row
             }
         }
         StatementType::Select => {
-            execute_select(statement, table)
+            execute_select(statement, table, w)
         }
     }
 }
@@ -466,7 +483,7 @@ fn _main<P: AsRef<Path>>(filename: P, r: &mut impl io::BufRead, w: &mut impl io:
                 let statement = prepare_statement(&input_buffer);
                 match statement {
                     Ok(statement) => {
-                        match execute_statement(&statement, &mut table) {
+                        match execute_statement(&statement, &mut table, w) {
                             Ok(rows) => {
                                 if !rows.is_empty() {
                                     for row in rows {
@@ -474,10 +491,6 @@ fn _main<P: AsRef<Path>>(filename: P, r: &mut impl io::BufRead, w: &mut impl io:
                                     }
                                 }
                                 let _ = writeln!(w, "Executed");
-                            }
-                            Err(ExecuteResult::TableFull) => {
-                                let _ = writeln!(w, "table is full");
-                                break;
                             }
                             Err(ExecuteResult::InvalidStatement) => {
                                 let _ = writeln!(w, "invalid statement");
@@ -555,6 +568,7 @@ impl SliceExt for [u8] {
 mod test {
     use super::*;
     use crate::table::Pager;
+    use crate::tree::KV;
 
     fn init() {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -685,6 +699,15 @@ mod test {
         let mut pager = Pager::new("tmp/test.db").unwrap();
         if let Some(BTreeNode::Leaf(page)) = pager.get_page_mut(0) {
             page.num_cells = BTreeLeafNode::NODE_MAX_CELLS as u32;
+            page.key_values = vec![
+                KV{key:0,value:Row::default()},
+                KV{key:1,value:Row::default()},
+                KV{key:2,value:Row::default()},
+                KV{key:3,value:Row::default()},
+                KV{key:4,value:Row::default()},
+                KV{key:5,value:Row::default()},
+                KV{key:6,value:Row::default()},
+            ];
         }
         let mut table = Table {
             pager,
@@ -692,10 +715,9 @@ mod test {
         };
         let mut stmt = Statement::new(StatementType::Insert);
         stmt.row_to_insert = Some(Row::default());
-        let result = execute_statement(&stmt, &mut table);
-        assert!(result.is_err());
-        let err = result.err().unwrap();
-        assert_eq!(err, ExecuteResult::TableFull);
+        let mut buf = vec![];
+        let result = execute_statement(&stmt, &mut table, &mut buf);
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -705,7 +727,8 @@ mod test {
             root_page_num: 0,
         };
         let stmt = Statement::new(StatementType::Insert);
-        let result = execute_statement(&stmt, &mut table);
+        let mut buf = vec![];
+        let result = execute_statement(&stmt, &mut table, &mut buf);
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert_eq!(err, ExecuteResult::InvalidStatement);
@@ -738,7 +761,8 @@ mod test {
             st_type: StatementType::Insert,
             row_to_insert: Some(row.clone()),
         };
-        let result = execute_statement(&stmt, &mut table);
+        let mut buf = vec![];
+        let result = execute_statement(&stmt, &mut table, &mut buf);
         assert!(result.is_ok());
         let mut expected = Vec::with_capacity(ROW_SIZE);
         row.serialize(&mut expected);
@@ -760,7 +784,8 @@ mod test {
     fn test_execute_select() {
         let mut table = Table::new("tmp/test.db").unwrap();
         let stmt = Statement::new(StatementType::Select);
-        let result = execute_statement(&stmt, &mut table);
+        let mut buf = vec![];
+        let result = execute_statement(&stmt, &mut table, &mut buf);
         assert!(result.is_ok());
     }
 
@@ -788,11 +813,13 @@ mod test {
             st_type: StatementType::Insert,
             row_to_insert: Some(row),
         };
-        let result = execute_statement(&stmt, &mut table);
+        let mut buf = vec![];
+        let result = execute_statement(&stmt, &mut table, &mut buf);
         assert!(result.is_ok());
 
         let stmt = Statement::new(StatementType::Select);
-        let result = execute_statement(&stmt, &mut table);
+        let mut buf = vec![];
+        let result = execute_statement(&stmt, &mut table, &mut buf);
         assert!(result.is_ok());
     }
 }
