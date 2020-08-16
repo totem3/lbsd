@@ -12,7 +12,7 @@ use std::path::Path;
 use std::process::exit;
 
 use log::trace;
-use crate::tree::{BTreeNode, BTreeLeafNode};
+use crate::tree::{BTreeNode, BTreeLeafNode, BTreeInternalNode};
 use crate::table::{Table, Cursor};
 
 pub mod tree;
@@ -114,6 +114,9 @@ fn show_constants() -> Result<(), MetaCommandResult> {
     println!("NODE_CELL_SIZE: {}", BTreeLeafNode::NODE_CELL_SIZE);
     println!("NODE_SPACE_FOR_CELLS: {}", BTreeLeafNode::NODE_SPACE_FOR_CELLS);
     println!("NODE_MAX_CELLS: {}", BTreeLeafNode::NODE_MAX_CELLS);
+    println!("INTERNAL_CELL_SIZE: {}", BTreeInternalNode::INTERNAL_CELL_SIZE);
+    println!("INTERNAL_SPACE_FOR_CELLS: {}", BTreeInternalNode::INTERNAL_SPACE_FOR_CELLS);
+    println!("INTERNAL_MAX_CELLS: {}", BTreeInternalNode::INTERNAL_MAX_CELLS);
     Ok(())
 }
 
