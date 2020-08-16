@@ -77,7 +77,7 @@ fn show_btree(table: Option<&mut Table>) -> Result<(), MetaCommandResult> {
 }
 
 fn show_btree_node(table: &mut Table, page_num: usize, indent: &str) -> Result<(), MetaCommandResult> {
-    let page = table.pager.get_page(page_num).clone();
+    let page = table.pager.get_page(page_num);
     let values = if let Some(node) = page {
         match node {
             BTreeNode::Leaf(node) => {

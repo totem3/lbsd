@@ -336,7 +336,7 @@ impl<'a> Cursor<'a> {
                 let mut left = 0;
                 let mut right = page.num_cells as usize;
                 let mut cursor_opts = CursorOpts {
-                    page_num: page_num,
+                    page_num,
                     cell_num: 0,
                     end_of_table: false,
                 };
