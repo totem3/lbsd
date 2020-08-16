@@ -373,7 +373,52 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), Execut
                 }
             };
         }
-        BTreeNode::Internal(_) => {}
+        BTreeNode::Internal(page) => {
+            let num_keys = page.num_keys;
+            trace!("execute_insert: num_keys: {}", num_keys);
+            let row_to_insert = match &statement.row_to_insert {
+                Some(s) => s,
+                None => {
+                    return Err(ExecuteResult::InvalidStatement);
+                }
+            };
+            let key_to_insert = row_to_insert.id;
+            trace!("execute_insert: key_to_insert: {}", key_to_insert);
+            let mut cursor = Cursor::find_insert_position(table, table.root_page_num, key_to_insert);
+            trace!("execute_insert: cursor.cell_num: {}", cursor.cell_num);
+            let page = match cursor.get_page() {
+                Some(BTreeNode::Leaf(node)) => { node },
+                Some(_) => {unreachable!("find_insert_position must return leaf node page num")},
+                None => {unreachable!("page must be present.")}
+            };
+            let is_max = page.is_max();
+            if is_max {
+                log::debug!("table is full");
+                if let Some(root) = cursor.split_and_insert(key_to_insert, row_to_insert.clone()) {
+                    cursor.table.root_page_num = root;
+                }
+                return Ok(());
+            }
+            let num_cells = page.num_cells;
+            let cell_num = cursor.cell_num;
+            match cursor.get_page_mut() {
+                Some(BTreeNode::Leaf(page)) => {
+                    if cell_num < num_cells.try_into().unwrap() {
+                        let key_at_index = page.key_values[cell_num].key;
+                        if key_at_index == key_to_insert {
+                            return Err(ExecuteResult::DuplicateKey);
+                        }
+                    }
+                    log::trace!("row inserted");
+                    page.insert_at(cell_num, row_to_insert.id, row_to_insert.clone());
+                }
+                Some(BTreeNode::Internal(_)) => {}
+                None => {
+                    log::error!("cannot get mutable reference to page!");
+                    return Err(ExecuteResult::PageMutFailure);
+                }
+            };
+        }
     }
     Ok(())
 }
@@ -701,6 +746,7 @@ mod test {
     fn test_execute_statement_insert_into_full_table() {
         let mut pager = Pager::new("tmp/test.db").unwrap();
         if let Some(BTreeNode::Leaf(page)) = pager.get_page_mut(0) {
+            page.is_root = 1;
             page.num_cells = BTreeLeafNode::NODE_MAX_CELLS as u32;
             page.key_values = vec![
                 KV{key:0,value:Row::default()},

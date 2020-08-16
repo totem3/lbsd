@@ -191,8 +191,14 @@ impl Pager {
 
     pub(crate) fn split_and_insert(&mut self, page_num: usize, cell_num: usize, key: u32, value: Row) -> Option<usize> {
         trace!("Pager::split_and_insert!");
-        let parent_page_num = self.new_page_num();
         let old_node = self.get_page_mut(page_num).expect("split_and_insert: current page not found!");
+        let mut parent_page_num = if old_node.is_root() > 0 {
+            // rootの場合は後で新しい親を作る
+            0
+        } else {
+            // 親がいる場合はまずその親を使う
+            old_node.get_parent() as usize
+        };
         let right_values;
         trace!("target page_num: {}", page_num);
         trace!("target cell_num: {}", cell_num);
@@ -210,7 +216,6 @@ impl Pager {
             let (left, right) = cur_kv.split_at(Self::LEAF_NODE_LEFT_SPLIT_COUNT);
             node.key_values = left.to_vec();
             node.num_cells = Self::LEAF_NODE_LEFT_SPLIT_COUNT as u32;
-            node.parent = parent_page_num as u32;
             node.is_root = 0;
             trace!("Pager::split_and_insert: left num_cells: {}", node.num_cells);
             trace!("Pager::split_and_insert: left parent: {}", node.parent);
@@ -221,6 +226,37 @@ impl Pager {
         }
 
         let right_page_num = self.new_page_num();
+        if original_is_root > 0 {
+            parent_page_num = self.new_page_num();
+            let new_parent = self.new_internal_page_mut(parent_page_num).expect("split_and_insert: failed to allocate new parent!");
+            if let BTreeNode::Internal(node) = new_parent {
+                node.is_root = original_is_root;
+                node.parent = original_parent;
+                node.right_child = right_page_num as u32;
+                node.insert(left_max_key, page_num as u32)
+            }
+            let old_node = self.get_page_mut(page_num).expect("split_and_insert: current page not found!");
+            if let BTreeNode::Leaf(node) = old_node {
+                node.parent = parent_page_num as u32;
+            } else {
+                unimplemented!("need to implement split internal node!");
+            }
+        } else {
+            match self.get_page_mut(original_parent as usize) {
+                Some(BTreeNode::Internal(node)) => {
+                    node.insert(left_max_key, page_num as u32);
+                    if node.right_child == page_num as u32 {
+                        node.right_child = right_page_num as u32;
+                    }
+                }
+                Some(_) => {
+                    unreachable!("Pager::split_and_insert: original parent is leaf node");
+                }
+                None => {
+                    unreachable!("Pager::split_and_insert: original parent does not exist");
+                }
+            }
+        }
         let new_node = self.get_page_mut(right_page_num).expect("split_and_insert: failed to allocate new page!");
         if let BTreeNode::Leaf(node) = new_node {
             node.key_values = right_values;
@@ -228,15 +264,6 @@ impl Pager {
             node.parent = parent_page_num as u32;
         } else {
             unreachable!("new node must be leaf");
-        }
-
-        let new_parent = self.new_internal_page_mut(parent_page_num).expect("split_and_insert: failed to allocate new parent!");
-        if let BTreeNode::Internal(node) = new_parent {
-            node.is_root = original_is_root;
-            node.parent = original_parent;
-            node.num_keys = 1;
-            node.right_child = right_page_num as u32;
-            node.insert(left_max_key, page_num as u32)
         }
 
         trace!("Pager::split_and_insert: done");
@@ -380,11 +407,11 @@ impl<'a> Cursor<'a> {
                                     Some(v) => {
                                         trace!("advance: choose next child. page_num is {}", v);
                                         v
-                                    },
+                                    }
                                     None => {
                                         trace!("advance: choose right_child. page_num is {}", parent.right_child);
                                         parent.right_child
-                                    },
+                                    }
                                 } as usize;
                                 if self.page_num == page_num {
                                     self.end_of_table = true;

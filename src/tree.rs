@@ -144,13 +144,31 @@ impl BTreeInternalNode {
         }
     }
 
+    pub const INTERNAL_SPACE_FOR_CELLS: usize = PAGE_SIZE - 1 - 1 - 4 - 4 - 4;
+    pub const INTERNAL_CELL_SIZE: usize = 8;
+    pub const INTERNAL_MAX_CELLS: usize = Self::INTERNAL_SPACE_FOR_CELLS / Self::INTERNAL_CELL_SIZE;
     pub(crate) fn insert(&mut self, key: u32, child: u32) {
+        if self.num_keys as usize >= Self::INTERNAL_MAX_CELLS {
+            unimplemented!("need to implement split!");
+        }
         let kc = KC { child, key };
-        self.key_children.push(kc);
+        let index = self.find_insert_position(key);
+        self.key_children.insert(index, kc);
+        self.num_keys += 1;
     }
 
     /// 次のページを返す。Leafまで再帰的に辿るのはPagerにやらせる
     pub(crate) fn find_key(&self, key: u32) -> u32 {
+        let index = self.find_insert_position(key);
+
+        if self.key_children.len() < index {
+            self.key_children[index].key
+        } else {
+            self.right_child
+        }
+    }
+
+    fn find_insert_position(&self, key: u32) -> usize {
         let mut left = 0;
         let mut right = self.key_children.len();
 
@@ -163,12 +181,7 @@ impl BTreeInternalNode {
                 left = index + 1;
             }
         }
-
-        if self.key_children.len() < left {
-            self.key_children[left].key
-        } else {
-            self.right_child
-        }
+        left
     }
 }
 
@@ -305,7 +318,7 @@ impl From<&[u8]> for BTreeNode {
                     parent,
                     num_keys,
                     right_child,
-                    key_children
+                    key_children,
                 };
                 BTreeNode::Internal(node)
             }
