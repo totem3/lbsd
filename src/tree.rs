@@ -42,17 +42,6 @@ pub struct BTreeLeafNode {
 
 impl BTreeLeafNode {
     pub(crate) fn get_row(&self, cell_num: usize) -> &Row {
-        // let diff = if cell_num + 1 >= self.num_cells as usize {
-        //     (cell_num + 1) - (self.num_cells as usize)
-        // } else {
-        //     0
-        // };
-        // for _ in 0..diff {
-        //     let new_row = Row::default();
-        //     let kv = KV { key: 0, value: new_row };
-        //     self.key_values.push(kv);
-        // }
-        // self.num_cells = self.key_values.len() as u32;
         self.key_values[cell_num].value.borrow()
     }
 
