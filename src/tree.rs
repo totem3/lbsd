@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use crate::{Row, ROW_SIZE, PAGE_SIZE};
+use crate::{ROW_SIZE, PAGE_SIZE};
 use byteorder::{ReadBytesExt, LittleEndian, WriteBytesExt};
 use std::convert::TryFrom;
 use std::borrow::{Borrow, BorrowMut};
@@ -41,18 +41,18 @@ pub struct BTreeLeafNode {
 }
 
 impl BTreeLeafNode {
-    pub(crate) fn get_row(&self, cell_num: usize) -> &Row {
+    pub(crate) fn get_row(&self, cell_num: usize) -> &Vec<u8> {
         self.key_values[cell_num].value.borrow()
     }
 
-    pub(crate) fn get_row_mut(&mut self, cell_num: usize) -> &mut Row {
+    pub(crate) fn get_row_mut(&mut self, cell_num: usize) -> &mut Vec<u8> {
         trace!("BTreeLeafNode.get_row_mut");
         trace!("BTreeLeafNode.get_row_mut: cell_num: {}", cell_num);
         let diff = (cell_num + 1) - (self.num_cells as usize);
         trace!("BTreeLeafNode.get_row_mut: diff: {}", diff);
         for i in 0..diff {
             trace!("BTreeLeafNode.get_row_mut: insert kv {}", i);
-            let new_row = Row::default();
+            let new_row = vec![0; ROW_SIZE];
             let kv = KV { key: 0, value: new_row };
             self.key_values.push(kv);
         }
@@ -61,7 +61,7 @@ impl BTreeLeafNode {
         self.key_values[cell_num].value.borrow_mut()
     }
 
-    pub(crate) fn insert(&mut self, key: u32, value: Row) {
+    pub(crate) fn insert(&mut self, key: u32, value: Vec<u8>) {
         if self.num_cells >= Self::max_cells() {
             panic!("max cells!");
         }
@@ -70,7 +70,7 @@ impl BTreeLeafNode {
         self.num_cells += 1;
     }
 
-    pub(crate) fn insert_at(&mut self, index: usize, key: u32, value: Row) {
+    pub(crate) fn insert_at(&mut self, index: usize, key: u32, value: Vec<u8>) {
         if self.num_cells >= Self::max_cells() {
             log::trace!("max cells!");
         }
@@ -196,9 +196,7 @@ impl BTreeNode {
                 let _ = buf.write_u32::<LittleEndian>(page.num_cells);
                 for key_value in &page.key_values {
                     let _ = buf.write_u32::<LittleEndian>(key_value.key);
-                    let mut value = vec![];
-                    key_value.value.serialize(&mut value);
-                    let _ = buf.write(&value);
+                    let _ = buf.write(&key_value.value);
                 }
             }
             BTreeNode::Internal(page) => {
@@ -243,11 +241,10 @@ impl BTreeNode {
 
 #[test]
 fn test_serialize() {
-    let row = Row {
-        id: 1,
-        username: *b"foo\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
-        email: *b"bar\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
-    };
+    let mut row = vec![0; ROW_SIZE];
+    row.write_u32::<LittleEndian>(1);
+    row.write(b"foo\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
+    row.write(b"bar\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
     let key_value = KV { key: 1, value: row };
     let node = BTreeNode::Leaf(BTreeLeafNode {
         node_type: NodeType::Leaf,
@@ -265,7 +262,7 @@ fn test_serialize() {
 #[derive(Debug, Clone)]
 pub struct KV {
     pub(crate) key: u32,
-    pub(crate) value: crate::Row,
+    pub(crate) value: Vec<u8>,
 }
 
 impl From<&[u8]> for BTreeNode {
@@ -317,10 +314,9 @@ impl From<&[u8]> for BTreeNode {
                 let mut key_values = vec![];
                 for _ in 0..num_cells {
                     let key = buf.read_u32::<LittleEndian>().expect("key must be u32");
-                    let mut row_buffer = vec![0; ROW_SIZE];
-                    let n = buf.read(&mut row_buffer).expect("read row failed");
+                    let mut value = vec![0; ROW_SIZE];
+                    let n = buf.read(&mut value).expect("read row failed");
                     trace!("BTreeNode::from:::<u8>: read row bytes: {}", n);
-                    let value = Row::deserialize(&row_buffer);
                     let kv = KV { key, value };
                     key_values.push(kv);
                 }
