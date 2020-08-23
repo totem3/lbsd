@@ -7,13 +7,15 @@ extern crate log;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::convert::TryInto;
 use std::fmt;
-use std::io::{self, BufRead, Read};
+use std::io::{self, BufRead, Write, Read};
 use std::path::Path;
 use std::process::exit;
 
 use log::trace;
 use crate::tree::{BTreeNode, BTreeLeafNode, BTreeInternalNode};
 use crate::table::{Table, Cursor};
+use std::error::Error;
+use std::fmt::Formatter;
 
 pub mod tree;
 pub mod table;
@@ -123,7 +125,7 @@ fn show_constants() -> Result<(), MetaCommandResult> {
 #[derive(Debug)]
 struct Statement {
     st_type: StatementType,
-    row_to_insert: Option<Row>,
+    row_to_insert: Option<Vec<u8>>,
 }
 
 impl Statement {
@@ -144,60 +146,68 @@ enum StatementType {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PrepareError {
     UnrecognizedStatement,
+    InvalidRecord,
+    // ここではなさそう
     SyntaxError,
 }
 
-#[derive(Clone)]
-struct Row {
-    id: u32,
-    username: [u8; COLUMN_USERNAME_SIZE],
-    email: [u8; COLUMN_EMAIL_SIZE],
-}
-
-impl Default for Row {
-    fn default() -> Self {
-        Row { id: 0, username: [0; COLUMN_USERNAME_SIZE], email: [0; COLUMN_EMAIL_SIZE] }
+impl From<RowConversionError> for PrepareError {
+    fn from(_: RowConversionError) -> Self {
+        PrepareError::InvalidRecord
     }
 }
 
-impl fmt::Debug for Row {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let username = match std::str::from_utf8(&self.username) {
-            Ok(v) => v,
-            Err(_) => "<username>",
-        };
-        let email = match std::str::from_utf8(&self.email) {
-            Ok(v) => v,
-            Err(_) => "<email>",
-        };
-        write!(
-            f,
-            "Row<id:{}, username:{}, email:{}>",
-            self.id, username, email
-        )
-    }
-}
-
-impl Row {
-    fn serialize(&self, buf: &mut Vec<u8>) {
-        buf.write_u32::<LittleEndian>(self.id).unwrap();
-        buf.extend_from_slice(&self.username);
-        buf.extend_from_slice(&self.email);
-    }
-    fn deserialize(input: &[u8]) -> Row {
-        let mut rdr = io::Cursor::new(input);
-        let id = rdr.read_u32::<LittleEndian>().unwrap();
-        let mut username = [0u8; 32];
-        let _ = rdr.read(&mut username).unwrap();
-        let mut email = [0u8; 255];
-        let _ = rdr.read(&mut email).unwrap();
-        Row {
-            id,
-            username,
-            email,
-        }
-    }
-}
+// #[derive(Clone)]
+// struct Row {
+//     id: u32,
+//     username: [u8; COLUMN_USERNAME_SIZE],
+//     email: [u8; COLUMN_EMAIL_SIZE],
+// }
+//
+// impl Default for Row {
+//     fn default() -> Self {
+//         Row { id: 0, username: [0; COLUMN_USERNAME_SIZE], email: [0; COLUMN_EMAIL_SIZE] }
+//     }
+// }
+//
+// impl fmt::Debug for Row {
+//     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+//         let username = match std::str::from_utf8(&self.username) {
+//             Ok(v) => v,
+//             Err(_) => "<username>",
+//         };
+//         let email = match std::str::from_utf8(&self.email) {
+//             Ok(v) => v,
+//             Err(_) => "<email>",
+//         };
+//         write!(
+//             f,
+//             "Row<id:{}, username:{}, email:{}>",
+//             self.id, username, email
+//         )
+//     }
+// }
+//
+// impl Row {
+//     fn serialize(&self, buf: &mut Vec<u8>) {
+//         buf.write_u32::<LittleEndian>(self.id).unwrap();
+//         buf.extend_from_slice(&self.username);
+//         buf.extend_from_slice(&self.email);
+//     }
+//     fn deserialize(input: &[u8]) -> Row {
+//         let mut rdr = io::Cursor::new(input);
+//         let id = rdr.read_u32::<LittleEndian>().unwrap();
+//         let mut username = [0u8; 32];
+//         let _ = rdr.read(&mut username).unwrap();
+//         let mut email = [0u8; 255];
+//         let _ = rdr.read(&mut email).unwrap();
+//         Row {
+//             id,
+//             username,
+//             email,
+//         }
+//     }
+// }
 
 const COLUMN_USERNAME_SIZE: usize = 32;
 const COLUMN_EMAIL_SIZE: usize = 255;
@@ -301,11 +311,9 @@ fn prepare_statement(input: &InputBuffer) -> Result<Statement, PrepareError> {
         u[0..(username.len())].copy_from_slice(&username);
         let mut e = [0u8; 255];
         e[0..(email.len())].copy_from_slice(&email);
-        let row = Row {
-            id,
-            username: u,
-            email: e,
-        };
+        let mut row = Vec::with_capacity(ROW_SIZE);
+        // ここでこのエラーを出すのはおかしい気がするが
+        cols_to_row(&mut row, id, username_str, email_str)?;
         statement.row_to_insert = Some(row);
         return Ok(statement);
     }
@@ -342,7 +350,7 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), Execut
                 }
             };
             let is_max = page.is_max();
-            let key_to_insert = row_to_insert.id;
+            let key_to_insert = get_id_from_row(row_to_insert).unwrap();
             trace!("execute_insert: key_to_insert: {}", key_to_insert);
             let mut cursor = Cursor::find_insert_position(table, table.root_page_num, key_to_insert);
             trace!("execute_insert: cursor.cell_num: {}", cursor.cell_num);
@@ -364,7 +372,7 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), Execut
                         }
                     }
                     log::trace!("row inserted");
-                    page.insert_at(cell_num, row_to_insert.id, row_to_insert.clone());
+                    page.insert_at(cell_num, get_id_from_row(row_to_insert).unwrap(), row_to_insert.clone());
                 }
                 Some(BTreeNode::Internal(_)) => {}
                 None => {
@@ -382,14 +390,14 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), Execut
                     return Err(ExecuteResult::InvalidStatement);
                 }
             };
-            let key_to_insert = row_to_insert.id;
+            let key_to_insert = get_id_from_row(row_to_insert).unwrap();
             trace!("execute_insert: key_to_insert: {}", key_to_insert);
             let mut cursor = Cursor::find_insert_position(table, table.root_page_num, key_to_insert);
             trace!("execute_insert: cursor.cell_num: {}", cursor.cell_num);
             let page = match cursor.get_page() {
-                Some(BTreeNode::Leaf(node)) => { node },
-                Some(_) => {unreachable!("find_insert_position must return leaf node page num")},
-                None => {unreachable!("page must be present.")}
+                Some(BTreeNode::Leaf(node)) => { node }
+                Some(_) => { unreachable!("find_insert_position must return leaf node page num") }
+                None => { unreachable!("page must be present.") }
             };
             let is_max = page.is_max();
             if is_max {
@@ -410,7 +418,7 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), Execut
                         }
                     }
                     log::trace!("row inserted");
-                    page.insert_at(cell_num, row_to_insert.id, row_to_insert.clone());
+                    page.insert_at(cell_num, get_id_from_row(row_to_insert).unwrap(), row_to_insert.clone());
                 }
                 Some(BTreeNode::Internal(_)) => {}
                 None => {
@@ -423,7 +431,7 @@ fn execute_insert(statement: &Statement, table: &mut Table) -> Result<(), Execut
     Ok(())
 }
 
-fn execute_select(_statement: &Statement, table: &mut Table, w: &mut impl io::Write) -> Result<Vec<Row>, ExecuteResult> {
+fn execute_select(_statement: &Statement, table: &mut Table, w: &mut impl io::Write) -> Result<Vec<u8>, ExecuteResult> {
     trace!("execute_select");
     let mut cursor = Cursor::table_start(table);
     select_all(&mut cursor, w);
@@ -437,7 +445,7 @@ fn select_all(cursor: &mut Cursor, w: &mut impl io::Write) {
             Some(BTreeNode::Leaf(_)) => {
                 trace!("select_all: node is leaf");
                 if let Some(row) = cursor.get_row() {
-                    let _ = writeln!(w, "{:?}", row);
+                    let _ = writeln!(w, "{:?}", display_row(row));
                 }
                 cursor.advance();
             }
@@ -458,7 +466,7 @@ fn select_all(cursor: &mut Cursor, w: &mut impl io::Write) {
 }
 
 // テストのため一時的にVec<Row>を返すようにしておく
-fn execute_statement(statement: &Statement, table: &mut Table, w: &mut impl io::Write) -> Result<Vec<Row>, ExecuteResult> {
+fn execute_statement(statement: &Statement, table: &mut Table, w: &mut impl io::Write) -> Result<Vec<u8>, ExecuteResult> {
     match statement.st_type {
         StatementType::Insert => {
             // テストのためselectでRowsを返したいので一時的に合わせておく
@@ -570,6 +578,9 @@ fn _main<P: AsRef<Path>>(filename: P, r: &mut impl io::BufRead, w: &mut impl io:
                         let _ = writeln!(w, "Syntax error at '{}'", &input_buffer.buffer);
                         continue;
                     }
+                    Err(PrepareError::InvalidRecord) => {
+                        let _ = writeln!(w, "Record invalid '{}'", &input_buffer.buffer);
+                    }
                 }
             }
             Err(e) => {
@@ -610,6 +621,85 @@ impl SliceExt for [u8] {
             &[]
         }
     }
+}
+
+#[derive(Debug)]
+enum RowConversionError {
+    TooLargeLength { col_name: String },
+    IoError(io::Error),
+}
+
+impl fmt::Display for RowConversionError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            RowConversionError::TooLargeLength { col_name } => {
+                write!(f, "failed to convert columns to row. Column({}) is too long", col_name)
+            }
+            RowConversionError::IoError(e) => {
+                write!(f, "failed to convert columns to row. io error: {}", e)
+            }
+        }
+    }
+}
+
+impl From<io::Error> for RowConversionError {
+    fn from(e: io::Error) -> Self {
+        RowConversionError::IoError(e)
+    }
+}
+
+impl Error for RowConversionError {}
+
+fn display_row(row: &[u8]) -> String {
+    let mut row_buf = row;
+    let id = row_buf.read_u32::<LittleEndian>().unwrap();
+    let mut username_buf = vec![0u8; USERNAME_SIZE];
+    let _ = row_buf.read(&mut username_buf);
+    let mut username_buf = username_buf.split_mut(|b| b == &b'\0');
+    let mut username_buf = username_buf.next().unwrap();
+    let username = std::str::from_utf8(&username_buf[..]).unwrap();
+
+    let mut email_buf = vec![0u8; EMAIL_SIZE];
+    let _ = row_buf.read(&mut email_buf);
+    let mut email_buf = email_buf.split_mut(|b| b == &b'\0');
+    let mut email_buf = email_buf.next().unwrap();
+    let email = std::str::from_utf8(&email_buf[..]).unwrap();
+    format!("Row<id:{}, username:{}, email:{}>", id, username, email)
+}
+
+#[test]
+fn test_display_row() {
+    let mut row = vec![0u8; ROW_SIZE];
+    let _ = cols_to_row(&mut row, 27, "hoge", "fuga");
+    let row_str = display_row(&row);
+    assert_eq!(row_str, "Row<id:27, username:hoge, email:fuga>".to_string());
+}
+
+fn cols_to_row<S: AsRef<str>, T: AsRef<str>>(buf: &mut Vec<u8>, id: u32, username: S, email: T) -> Result<(), RowConversionError> {
+    if buf.len() < ROW_SIZE {
+        buf.extend(vec![0; ROW_SIZE-buf.len()])
+    }
+    let username: &str = username.as_ref();
+    if username.len() > 32 {
+        return Err(RowConversionError::TooLargeLength { col_name: "username".to_string() });
+    }
+    let email: &str = email.as_ref();
+    if email.len() > 255 {
+        return Err(RowConversionError::TooLargeLength { col_name: "email".to_string() });
+    }
+
+    (&mut buf[0..4]).write_u32::<LittleEndian>(id)?;
+    (&mut buf[4..]).write_all((format!("{:\0<32}", username)).as_ref())?;
+    (&mut buf[36..]).write_all((format!("{:\0<255}", email)).as_ref())?;
+    Ok(())
+}
+
+fn get_id_from_row(row: &[u8]) -> Result<u32, io::Error> {
+    (&row[..]).read_u32::<LittleEndian>()
+}
+
+fn default_row(buf: &mut Vec<u8>) -> Result<(), RowConversionError> {
+    cols_to_row(buf, 0, "", "")
 }
 
 #[cfg(test)]
@@ -687,25 +777,12 @@ mod test {
     fn test_serialize_row() {
         init();
         let id = 1;
-        let username_bytes: &[u8] = b"totem3";
-        let mut username: [u8; 32] = [0; 32];
-        for (i, b) in username_bytes.iter().enumerate() {
-            username[i] = *b;
-        }
-        let email_bytes: &[u8] = b"totem3@totem3.com";
-        let mut email: [u8; 255] = [0; 255];
-        for (i, b) in email_bytes.iter().enumerate() {
-            email[i] = *b;
-        }
-        let row = Row {
-            id,
-            username,
-            email,
-        };
+        let username = "totem3";
+        let email = "totem3@totem3.com";
         let mut buffer = vec![];
-        row.serialize(&mut buffer);
+        cols_to_row(&mut buffer, id, username, email).unwrap();
         let mut expected = vec![];
-        let _ = expected.write_u32::<byteorder::LittleEndian>(row.id);
+        let _ = expected.write_u32::<byteorder::LittleEndian>(id);
         expected.extend_from_slice(&[
             116, 111, 116, 101, 109, 51, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0,
@@ -748,14 +825,28 @@ mod test {
         if let Some(BTreeNode::Leaf(page)) = pager.get_page_mut(0) {
             page.is_root = 1;
             page.num_cells = BTreeLeafNode::NODE_MAX_CELLS as u32;
+            let mut buf0 = vec![];
+            let mut buf1 = vec![];
+            let mut buf2 = vec![];
+            let mut buf3 = vec![];
+            let mut buf4 = vec![];
+            let mut buf5 = vec![];
+            let mut buf6 = vec![];
+            let _ = default_row(&mut buf0);
+            let _ = default_row(&mut buf1);
+            let _ = default_row(&mut buf2);
+            let _ = default_row(&mut buf3);
+            let _ = default_row(&mut buf4);
+            let _ = default_row(&mut buf5);
+            let _ = default_row(&mut buf6);
             page.key_values = vec![
-                KV{key:0,value:Row::default()},
-                KV{key:1,value:Row::default()},
-                KV{key:2,value:Row::default()},
-                KV{key:3,value:Row::default()},
-                KV{key:4,value:Row::default()},
-                KV{key:5,value:Row::default()},
-                KV{key:6,value:Row::default()},
+                KV { key: 0, value: buf0 },
+                KV { key: 1, value: buf1 },
+                KV { key: 2, value: buf2 },
+                KV { key: 3, value: buf3 },
+                KV { key: 4, value: buf4 },
+                KV { key: 5, value: buf5 },
+                KV { key: 6, value: buf6 },
             ];
         }
         let mut table = Table {
@@ -763,7 +854,9 @@ mod test {
             root_page_num: 0,
         };
         let mut stmt = Statement::new(StatementType::Insert);
-        stmt.row_to_insert = Some(Row::default());
+        let mut row = vec![];
+        let _ = default_row(&mut row);
+        stmt.row_to_insert = Some(row);
         let mut buf = vec![];
         let result = execute_statement(&stmt, &mut table, &mut buf);
         assert!(result.is_ok());
@@ -791,21 +884,10 @@ mod test {
             root_page_num: 0,
         };
         let id = 1;
-        let username_bytes: &[u8] = b"totem3";
-        let mut username: [u8; 32] = [0; 32];
-        for (i, b) in username_bytes.iter().enumerate() {
-            username[i] = *b;
-        }
-        let email_bytes: &[u8] = b"totem3@totem3.com";
-        let mut email: [u8; 255] = [0; 255];
-        for (i, b) in email_bytes.iter().enumerate() {
-            email[i] = *b;
-        }
-        let row = Row {
-            id,
-            username,
-            email,
-        };
+        let username = "totem3";
+        let email = "totem3@totem3.com";
+        let mut row = vec![];
+        cols_to_row(&mut row, id, username, email).unwrap();
         let stmt = Statement {
             st_type: StatementType::Insert,
             row_to_insert: Some(row.clone()),
@@ -813,13 +895,12 @@ mod test {
         let mut buf = vec![];
         let result = execute_statement(&stmt, &mut table, &mut buf);
         assert!(result.is_ok());
-        let mut expected = Vec::with_capacity(ROW_SIZE);
-        row.serialize(&mut expected);
-        let mut buf = vec![];
+        let expected = row;
+        let mut buf: Vec<u8> = vec![];
         match table.pager.get_page(0) {
             Some(BTreeNode::Leaf(leaf)) => {
                 leaf.key_values.first().and_then(|kv| {
-                    kv.value.serialize(&mut buf);
+                    buf = kv.value.clone();
                     Some(())
                 });
             }
@@ -843,21 +924,10 @@ mod test {
         init();
         let mut table = Table::new("tmp/test.db").unwrap();
         let id = 1;
-        let username_bytes: &[u8] = b"totem3";
-        let mut username: [u8; 32] = [0; 32];
-        for (i, b) in username_bytes.iter().enumerate() {
-            username[i] = *b;
-        }
-        let email_bytes: &[u8] = b"totem3@totem3.com";
-        let mut email: [u8; 255] = [0; 255];
-        for (i, b) in email_bytes.iter().enumerate() {
-            email[i] = *b;
-        }
-        let row = Row {
-            id,
-            username,
-            email,
-        };
+        let username = "totem3";
+        let email = "totem3@totem3.com";
+        let mut row = vec![];
+        let _ =cols_to_row(&mut row, id, username, email);
         let stmt = Statement {
             st_type: StatementType::Insert,
             row_to_insert: Some(row),

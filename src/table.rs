@@ -1,6 +1,6 @@
 use std::path::Path;
 use log::{trace};
-use crate::{ROWS_PER_PAGE, ROW_SIZE, TABLE_MAX_PAGES, PAGE_SIZE, Row};
+use crate::{ROWS_PER_PAGE, ROW_SIZE, TABLE_MAX_PAGES, PAGE_SIZE};
 use crate::tree::{BTreeNode, BTreeLeafNode, BTreeInternalNode};
 use std::fs::{File, OpenOptions};
 use std::fs;
@@ -189,7 +189,7 @@ impl Pager {
     const LEAF_NODE_RIGHT_SPLIT_COUNT: usize = (BTreeLeafNode::NODE_MAX_CELLS + 1) / 2;
     const LEAF_NODE_LEFT_SPLIT_COUNT: usize = (BTreeLeafNode::NODE_MAX_CELLS + 1) - Self::LEAF_NODE_RIGHT_SPLIT_COUNT;
 
-    pub(crate) fn split_and_insert(&mut self, page_num: usize, cell_num: usize, key: u32, value: Row) -> Option<usize> {
+    pub(crate) fn split_and_insert(&mut self, page_num: usize, cell_num: usize, key: u32, value: Vec<u8>) -> Option<usize> {
         trace!("Pager::split_and_insert!");
         let old_node = self.get_page_mut(page_num).expect("split_and_insert: current page not found!");
         let mut parent_page_num = if old_node.is_root() > 0 {
@@ -433,7 +433,7 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    fn get_row_mut(&mut self) -> Option<&mut Row> {
+    fn get_row_mut(&mut self) -> Option<&mut Vec<u8>> {
         trace!("TCursor::get_row_mut");
         let page_num = self.page_num;
         trace!("TCursor::get_row_mut: page_num: {}", page_num);
@@ -453,7 +453,7 @@ impl<'a> Cursor<'a> {
         self.table.pager.get_page_mut(page_num)
     }
 
-    pub(crate) fn get_row(&mut self) -> Option<&Row> {
+    pub(crate) fn get_row(&mut self) -> Option<&Vec<u8>> {
         trace!("TCursor::get_row");
         let page_num = self.page_num;
         trace!("TCursor::get_row page_num: {}", page_num);
@@ -475,7 +475,7 @@ impl<'a> Cursor<'a> {
         self.table.pager.get_page(page_num)
     }
 
-    pub(crate) fn split_and_insert(&mut self, key: u32, value: Row) -> Option<usize> {
+    pub(crate) fn split_and_insert(&mut self, key: u32, value: Vec<u8>) -> Option<usize> {
         trace!("TCursor::split_and_insert");
         self.table.pager.split_and_insert(self.page_num, self.cell_num, key, value)
     }
